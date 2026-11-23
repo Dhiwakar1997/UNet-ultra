@@ -54,6 +54,11 @@ struct CaptureView: View {
             CameraPreviewView(session: captureService.captureSession, proxy: previewProxy) { devicePoint in
                 Task { await model.handleTap(devicePoint: devicePoint, service: captureService, store: store) }
             }
+            // The square the model will see; taps outside it are refused.
+            if let configuration = captureService.configuration {
+                SquareGuideView(proxy: previewProxy, imageWidth: configuration.videoWidth,
+                                imageHeight: configuration.videoHeight)
+            }
             ForEach(Array(model.pendingObjects.enumerated()), id: \.element.id) { index, object in
                 if let point = previewProxy.layerPoint(fromDevicePoint: object.devicePoint) {
                     TapMarker(number: index + 1, label: object.label)

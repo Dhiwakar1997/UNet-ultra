@@ -14,6 +14,7 @@ struct CaptureGuidanceView: View {
         Topic(title: "The object", items: [
             "Case closed, always in the same cover.",
             "Tap the case to focus on it, wait for the marker, then press Capture.",
+            "Keep the whole case inside the square: the model only sees that part of the frame.",
         ]),
         Topic(title: "Distance and pose", items: [
             "15–70 cm from the camera; vary the distance across the whole range.",

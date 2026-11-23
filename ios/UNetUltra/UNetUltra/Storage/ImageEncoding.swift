@@ -18,6 +18,21 @@ enum ImageEncoding {
         return context.jpegRepresentation(of: image, colorSpace: colorSpace, options: [qualityKey: quality])
     }
 
+    /// The frame converted to sRGB through the same Core Image path as `jpegData`, as a new BGRA
+    /// buffer. Inference uses this so the model sees the colours the training JPEGs had.
+    static func srgbPixelBuffer(from pixelBuffer: CVPixelBuffer) -> CVPixelBuffer? {
+        let width = CVPixelBufferGetWidth(pixelBuffer), height = CVPixelBufferGetHeight(pixelBuffer)
+        var created: CVPixelBuffer?
+        let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [String: Any]()]
+        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
+                                  attributes as CFDictionary, &created) == kCVReturnSuccess,
+              let output = created, let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
+        else { return nil }
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        context.render(image, to: output, bounds: image.extent, colorSpace: colorSpace)
+        return output
+    }
+
     /// Depth in metres -> millimetres, row-major. Invalid readings become 0.
     static func depthMillimetres(from frame: CapturedFrame) -> [UInt16] {
         frame.depthValues().map(DepthMath.millimetres(fromMetres:))

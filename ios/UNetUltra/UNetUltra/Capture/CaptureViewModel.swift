@@ -54,6 +54,15 @@ final class CaptureViewModel: ObservableObject {
             statusMessage = "Start a session first."
             return
         }
+        // The model only sees the centre square of the frame, so the object must be inside it.
+        // A tap outside neither focuses nor counts as an object.
+        if let configuration = service.configuration,
+           !CenterSquareCrop.containsDevicePoint(x: Double(devicePoint.x), y: Double(devicePoint.y),
+                                                 imageWidth: configuration.videoWidth,
+                                                 imageHeight: configuration.videoHeight) {
+            statusMessage = CenterSquareCrop.outsideHint
+            return
+        }
         isBusy = true
         defer { isBusy = false }
 
