@@ -197,3 +197,16 @@ def update_session(path, files, manifest=None):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+
+
+def find_sessions(directory, split=None):
+    """Session zips in a directory, sorted by name, optionally only those of one split."""
+    found = []
+    for path in sorted(Path(directory).glob("*.zip")):
+        try:
+            with Session(path) as sess:
+                if split is None or sess.split == split:
+                    found.append(str(path))
+        except (KeyError, FileNotFoundError, zipfile.BadZipFile, json.JSONDecodeError):
+            continue  # not a session zip
+    return found
