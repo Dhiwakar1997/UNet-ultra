@@ -8,6 +8,9 @@ A session is a zip, or the same tree extracted to a directory:
 
 import io
 import json
+import os
+import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -134,3 +137,63 @@ class Session:
         """Object index per pixel (0 = none, 1..N in meta.objects order), or None."""
         name = self.sample_path(sample_id, INSTANCES_FILE)
         return self._array(name) if self.exists(name) else None
+
+
+def image_to_depth_point(point, image_size, depth_size):
+    """Map an image pixel (x, y) to depth-map pixel coordinates (pixel-centre convention)."""
+    return (
+        (point[0] + 0.5) * depth_size[0] / image_size[0] - 0.5,
+        (point[1] + 0.5) * depth_size[1] / image_size[1] - 0.5,
+    )
+
+
+def lidar_at_point(depth_m, valid, point, image_size, window=2):
+    """Median LiDAR depth (m) over valid pixels in a (2*window+1)^2 box around an image point.
+
+    Returns (distance_m, n_valid); distance is nan when no valid pixel falls in the box."""
+    h, w = depth_m.shape
+    u, v = image_to_depth_point(point, image_size, (w, h))
+    u, v = int(round(u)), int(round(v))
+    rows = slice(max(v - window, 0), min(v + window + 1, h))
+    cols = slice(max(u - window, 0), min(u + window + 1, w))
+    values = depth_m[rows, cols][valid[rows, cols]]
+    if values.size == 0:
+        return float("nan"), 0
+    return float(np.median(values)), int(values.size)
+
+
+def png_bytes(array):
+    """Encode a uint8 or uint16 [H, W] array as PNG."""
+    buffer = io.BytesIO()
+    Image.fromarray(array).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def update_session(path, files, manifest=None):
+    """Add or replace files in a session (zip or directory), optionally replacing the manifest.
+
+    `files` maps names inside the session to bytes. A zip is rewritten to a temporary file and
+    swapped in at the end, so an interrupted write never leaves a half-written session."""
+    files = dict(files)
+    if manifest is not None:
+        files["manifest.json"] = json.dumps(manifest, indent=2).encode()
+    path = Path(path)
+    if path.is_dir():
+        for name, data in files.items():
+            target = path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        return
+    fd, tmp = tempfile.mkstemp(suffix=".zip", dir=path.parent)
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zout:
+            for info in zin.infolist():
+                if info.filename not in files and not info.is_dir():
+                    zout.writestr(info.filename, zin.read(info.filename))
+            for name, data in files.items():
+                zout.writestr(name, data)
+        shutil.move(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)

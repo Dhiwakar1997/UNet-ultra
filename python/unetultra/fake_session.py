@@ -27,8 +27,10 @@ OBJECT_COLOURS = ((214, 64, 52), (52, 120, 214), (240, 190, 40), (60, 170, 90))
 
 
 def fake_lens_position(distance_m):
-    """The synthetic device's lens curve: monotonic, non-linear, and 0..1 like the real reading."""
-    return float(np.clip(0.08 + 0.125 / distance_m, 0.0, 1.0))
+    """The synthetic device's lens curve: monotonic, non-linear, and 0..1 like the real reading.
+
+    As on iOS, 0 is the nearest focus and 1 the furthest."""
+    return float(np.clip(1.0 - 0.125 / distance_m, 0.0, 1.0))
 
 
 def _png_bytes(array):
