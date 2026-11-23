@@ -1,0 +1,111 @@
+"""Round trip of the fake session through dataset -> model -> metrics, plus reports and export."""
+
+import numpy as np
+import pytest
+import torch
+
+from unetultra.calibration import fit_from_sessions
+from unetultra.capture_report import coverage_by_distance, depth_edge_overlay, format_report, object_coverage
+from unetultra.dataset import SessionDataset
+from unetultra.metrics import correlation, distance_error_by_bin, evaluate_model, evaluate_sample, summarise
+from unetultra.model import UNetMulti
+from unetultra.session import Session
+from unetultra.train import TrainConfig, fit, load_model, mask_loss, split_sessions
+
+SMALL = (128, 96)
+
+
+@pytest.fixture(scope="module")
+def calibration(fake_zips):
+    return fit_from_sessions(fake_zips["train"])[0]
+
+
+def _perfect(item):
+    """A prediction equal to the truth: the reviewed labels and the LiDAR depth."""
+    return item["labels"].clone(), item["depth"].clone()
+
+
+def test_perfect_predictions_score_perfectly(fake_zips, calibration):
+    dataset = SessionDataset([fake_zips["test"]], calibration)
+    object_rows, image_rows = [], []
+    for index in range(len(dataset)):
+        item = dataset[index]
+        rows, image_row = evaluate_sample(*_perfect(item), item, dataset.sample_meta(index))
+        object_rows += rows
+        image_rows.append(image_row)
+    summary = summarise(object_rows, image_rows)
+    assert summary["dice"] == 1.0 and summary["missed_fraction"] == 0.0
+    assert summary["distance"]["mae"] < 0.05
+    assert summary["background_false_positive_fraction"] == 0.0 and summary["n_background_only"] >= 1
+    # The bias-fixed size agrees with the ruler truth far better than the reference method.
+    assert summary["width_vs_measured"]["mape"] < 4 and summary["height_vs_measured"]["mape"] < 4
+    assert summary["width_vs_measured_raw"]["mape"] > summary["width_vs_measured"]["mape"]
+    # The calibrated focus distance is a sensible baseline for the focused object.
+    assert summary["distance_focus_baseline"]["mape"] < 10
+    assert distance_error_by_bin(object_rows) and np.isfinite(correlation(object_rows, "lens_position", "true_distance_cm"))
+
+
+def test_missed_objects_and_false_positives_are_reported(fake_zips, calibration):
+    dataset = SessionDataset([fake_zips["test"]], calibration)
+    with_object = next(i for i in range(len(dataset)) if dataset[i]["instances"].max() > 0)
+    item = dataset[with_object]
+    rows, _ = evaluate_sample(torch.zeros_like(item["labels"]), item["depth"], item)
+    assert all(row["missed"] and row["dice"] == 0 and np.isnan(row["pred_distance_cm"]) for row in rows)
+
+    background = next(i for i in range(len(dataset)) if dataset[i]["instances"].max() == 0)
+    item = dataset[background]
+    everything = torch.ones_like(item["labels"])
+    rows, image_row = evaluate_sample(everything, item["depth"], item)
+    assert rows == [] and image_row["background_only"] and image_row["predicted_fraction"] == 1.0
+
+
+def test_training_round_trip(fake_zips, calibration, tmp_path):
+    train_paths, val_paths = split_sessions(fake_zips["train"])
+    train = SessionDataset(train_paths, calibration, augment=True, size=SMALL)
+    val = SessionDataset(val_paths, calibration, size=SMALL)
+    config = TrainConfig(epochs=4, batch_size=4, features=(8, 16), lr=3e-3)
+    history, best = fit(train, val, config, tmp_path, name="tiny", device="cpu", log=lambda *_: None)
+    assert len(history) == 4 and history[-1]["train_loss"] < history[0]["train_loss"]
+    assert (tmp_path / "tiny_history.json").exists()
+
+    model, checkpoint = load_model(best)
+    assert checkpoint["classes"] == ["background", "airpods_case"] and model.n_classes == 1
+    test = SessionDataset([fake_zips["test"]], calibration, size=SMALL)
+    object_rows, image_rows, predictions = evaluate_model(model, test)
+    summary = summarise(object_rows, image_rows)
+    assert len(image_rows) == len(test) == len(predictions)
+    assert summary["n_objects"] == len(object_rows) > 0
+    assert {"dice", "iou", "distance", "width_vs_lidar", "distance_focus_baseline"} <= set(summary)
+
+
+def test_multi_class_loss_and_shapes():
+    model = UNetMulti(features=(8, 16), n_classes=3)
+    logits, _ = model(torch.rand(2, 3, 32, 48), torch.zeros(2, 2))
+    labels = torch.randint(0, 4, (2, 32, 48))
+    labels[0, :4] = 255  # ignored pixels must not break the loss
+    loss = mask_loss(logits, labels, 3)
+    assert logits.shape[1] == 4 and torch.isfinite(loss)
+    loss.backward()
+
+
+def test_capture_report(fake_zip):
+    with Session(fake_zip) as sess:
+        rows = [row for sample_id in sess.sample_ids for row in object_coverage(sess, sample_id)]
+        with_object = next(s for s in sess.sample_ids if sess.meta(s)["objects"])
+        picture = depth_edge_overlay(sess, with_object)
+        assert picture.shape == sess.image(with_object).shape
+        assert (picture == (255, 0, 0)).all(axis=-1).sum() > 20  # depth edges were drawn
+    assert rows and all(row["coverage"] > 0.8 for row in rows)
+    text = format_report(rows, coverage_by_distance(rows))
+    assert "Safe minimum distance" in text
+
+
+def test_coreml_conversion(tmp_path):
+    pytest.importorskip("coremltools")
+    from unetultra.export import export_coreml
+
+    mlmodel = export_coreml(UNetMulti(features=(8, 16)), ["background", "airpods_case"], tmp_path / "m.mlpackage")
+    spec = mlmodel.get_spec()
+    assert [i.name for i in spec.description.input] == ["image", "meta"]
+    assert [o.name for o in spec.description.output] == ["mask_logits", "depth"]
+    assert (tmp_path / "m.mlpackage").is_dir()
