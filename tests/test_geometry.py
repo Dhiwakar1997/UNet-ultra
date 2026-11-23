@@ -89,3 +89,28 @@ def test_nearest_resize_keeps_values():
     labels = np.array([[0, 0, 7, 7], [0, 0, 7, 7]], dtype=np.uint8)
     assert nearest_resize(labels, (2, 1)).tolist() == [[0, 7]]
     assert set(np.unique(nearest_resize(labels, (9, 5)))) == {0, 7}
+
+
+def test_robust_size_removes_the_known_bias():
+    from unetultra.geometry import object_size_robust_m
+
+    mask, depth = _square_scene(side_m=0.05, z=0.4)
+    w, h, d = object_size_robust_m(mask, depth, K.fx, K.fy, K.cx, K.cy)
+    # The exact answer is the mask's pixel count along each axis times the size of one pixel.
+    columns, rows = int(mask.any(dim=0).sum()), int(mask.any(dim=1).sum())
+    assert w == pytest.approx(columns * 0.4 / K.fx, rel=1e-3) and h == pytest.approx(rows * 0.4 / K.fy, rel=1e-3)
+    assert (w, h) == pytest.approx((0.05, 0.05), rel=0.04) and d == pytest.approx(0.4)
+    raw_w, _, _ = object_size_m(mask, depth, K.fx, K.fy, K.cx, K.cy)
+    assert abs(w - 0.05) < abs(raw_w - 0.05)
+
+
+def test_robust_size_survives_background_depth_on_the_edges():
+    from unetultra.geometry import object_size_robust_m
+
+    mask, depth = _square_scene(side_m=0.05, z=0.4)
+    rows, cols = torch.nonzero(mask, as_tuple=True)
+    depth[rows.min() : rows.max() + 1, cols.max() - 2 : cols.max() + 1] = 1.2  # edge picked up the wall
+    raw_w, _, _ = object_size_m(mask, depth, K.fx, K.fy, K.cx, K.cy)
+    w, _, d = object_size_robust_m(mask, depth, K.fx, K.fy, K.cx, K.cy)
+    assert raw_w > 0.08  # the reference method is thrown far off
+    assert w == pytest.approx(0.05, rel=0.04) and d == pytest.approx(0.4)

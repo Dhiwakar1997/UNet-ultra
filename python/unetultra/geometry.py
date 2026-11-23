@@ -72,9 +72,32 @@ def object_size_m(mask, depth, fx, fy, cx, cy):
     return width.item(), height.item(), Z.median().item()
 
 
-def measure_objects(mask, depth, fx, fy, cx, cy, min_pixels=30):
+def object_size_robust_m(mask, depth, fx, fy, cx, cy, depth_band=0.1, min_band_m=0.01, trim=0.005):
+    """Like object_size_m, with the two known biases fixed. Returns (width_m, height_m, distance_m).
+
+    1. Depth outliers: mask pixels whose depth is far from the object's median (typically edge
+       pixels that picked up the background's depth) are measured at the median depth instead,
+       so one stray depth value cannot stretch the object.
+    2. Extent: uses (almost) the full pixel extent plus one pixel footprint, because N pixel
+       centres span N - 1 pixel widths but the object covers N.
+    """
+    v, u = torch.nonzero(mask, as_tuple=True)
+    if len(u) == 0:
+        return 0.0, 0.0, 0.0
+    Z = depth[v, u].float()
+    distance = Z.median()
+    outlier = (Z - distance).abs() > max(min_band_m, depth_band * float(distance))
+    Z = torch.where(outlier, distance, Z)
+    X, Y, _ = backproject(u.float(), v.float(), Z, fx, fy, cx, cy)
+    width = torch.quantile(X, 1 - trim) - torch.quantile(X, trim) + distance / fx
+    height = torch.quantile(Y, 1 - trim) - torch.quantile(Y, trim) + distance / fy
+    return width.item(), height.item(), distance.item()
+
+
+def measure_objects(mask, depth, fx, fy, cx, cy, min_pixels=30, robust=False):
     """Split a binary mask into connected components and measure each one.
-    Returns a list of dicts sorted by area, largest first."""
+    Returns a list of dicts sorted by area, largest first. Each dict also carries the
+    component's boolean mask under "mask". robust=True uses object_size_robust_m."""
     components, n = ndimage.label(mask.cpu().numpy())
     results = []
     for i in range(1, n + 1):
@@ -82,8 +105,8 @@ def measure_objects(mask, depth, fx, fy, cx, cy, min_pixels=30):
         area = int(blob.sum())
         if area < min_pixels:
             continue
-        w, h, d = object_size_m(blob, depth, fx, fy, cx, cy)
-        results.append({"id": i, "area_px": area, "width_m": w, "height_m": h, "distance_m": d})
+        w, h, d = (object_size_robust_m if robust else object_size_m)(blob, depth, fx, fy, cx, cy)
+        results.append({"id": i, "area_px": area, "width_m": w, "height_m": h, "distance_m": d, "mask": blob})
     return sorted(results, key=lambda r: r["area_px"], reverse=True)
 
 
