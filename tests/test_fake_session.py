@@ -15,6 +15,7 @@ def test_fake_session_is_valid(fake_zip):
     report = validate_session(fake_zip)
     assert report.ok, report.format()
     assert report.n_samples == 8 and report.n_background_only >= 1
+    assert report.excluded_outside_crop == ["0003"] and "excluded_outside_crop" in report.format()
     assert main([str(fake_zip)]) == 0
 
 

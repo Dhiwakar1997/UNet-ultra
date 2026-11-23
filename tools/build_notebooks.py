@@ -148,7 +148,7 @@ session. The test zip is never opened here. The model never receives depth as an
 EPOCHS = 60
 BATCH_SIZE = 8
 DEPTH_WEIGHT = 0.5          # weight of the depth loss against the mask loss
-OBJECT_DEPTH_WEIGHT = 5.0   # extra weight for depth error on object pixels (1.0 = plain L1 over all valid pixels)
+OBJECT_DEPTH_WEIGHT = 1.0   # weight of the depth error averaged over object pixels alone (0 = plain L1 over all valid pixels)
 VAL_SESSIONS = None         # e.g. ["../data/session_....zip"]; None holds out about a quarter of the sessions
 """, tag="parameters"),
     code("""
@@ -175,7 +175,7 @@ calibration.save(MODELS / "calibration.json")
 print(f"{calibration.n_samples} samples, RMSE {calibration.rmse_m * 100:.2f} cm, device {calibration.device_model}")
 plots.calibration_fit(calibration, points);
 """),
-    md("## Datasets\n\nAccepted samples only, resized to 512×384 with the intrinsics scaled to match."),
+    md("## Datasets\n\nAccepted samples only. Pre-processing takes the centre square of each frame and resizes it to\n512×512, with the intrinsics transformed to match. Samples whose object was tapped outside that\nsquare cannot be used and are listed as `excluded_outside_crop`."),
     code("""
 from unetultra.dataset import SessionDataset
 
@@ -183,6 +183,8 @@ train_set = SessionDataset(train_paths, calibration, augment=True)
 val_set = SessionDataset(val_paths, calibration)
 background = sum(int(train_set[i]["instances"].max()) == 0 for i in range(len(train_set)))
 print(f"train {len(train_set)} samples ({train_set.skipped} skipped as not accepted), validation {len(val_set)}")
+for path, sample_id, reason in train_set.excluded + val_set.excluded:
+    print(f"  {reason}: {Path(path).name} sample {sample_id}")
 print(f"background-only share of training samples: {background / max(len(train_set), 1):.0%} (aim for about 10%)")
 print("classes:", train_set.classes)
 """),
@@ -310,8 +312,9 @@ write("04_export_coreml", [
 Converts the trained model to `UNetUltra.mlpackage` (iOS 17+) and puts it next to
 `calibration.json`, ready for the app's Inference tab.
 
-- input `image`: 512×384 RGB, the 1/255 scaling used in training is built in
-- input `meta`: `[1, 2]` float32 = `[log(calibrated focus distance in m), fx at 512 wide / 1000 − 1]`
+- input `image`: 512×512 RGB (the centre square of the frame, cropped and resized by the app);
+  the 1/255 scaling used in training is built in
+- input `meta`: `[1, 2]` float32 = `[log(calibrated focus distance in m), fx of the 512×512 crop / 1000 − 1]`
 - outputs `mask_logits` and `depth` (metres)
 
 Run this on the Mac: comparing Core ML with PyTorch needs macOS.
@@ -367,7 +370,9 @@ calibration_file = MODELS / "calibration.json"
 assert package.exists() and calibration_file.exists()
 resources = Path("../ios/UNetUltra/UNetUltra/Resources")
 resources.mkdir(exist_ok=True)
-shutil.copytree(package, resources / package.name, dirs_exist_ok=True)
+# Bundled under another name: Xcode generates a class named after the file, and "UNetUltra"
+# is already the app module's name.
+shutil.copytree(package, resources / "UNetUltraModel.mlpackage", dirs_exist_ok=True)
 shutil.copy(calibration_file, resources / calibration_file.name)
 print("copied to", resources.resolve())
 """),

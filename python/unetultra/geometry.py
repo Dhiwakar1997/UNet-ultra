@@ -47,6 +47,75 @@ class Intrinsics:
         return Intrinsics(self.fx, self.fy, width - 1 - self.cx, self.cy)
 
 
+MODEL_INPUT = 512
+
+
+@dataclass(frozen=True)
+class CenterSquareCrop:
+    """The model's view of a frame: the centre square, resized to `out` x `out` pixels.
+
+    This is the single definition of the crop geometry. The same transform applies to
+    intrinsics, tap points and every per-pixel map (each map is cropped to its own centre
+    square), and the iOS app mirrors it exactly. Capture and storage are never cropped.
+    """
+
+    x0: int
+    y0: int
+    side: int
+    out: int = MODEL_INPUT
+
+    @classmethod
+    def for_size(cls, size, out=MODEL_INPUT):
+        """Crop for an image or map of size (W, H)."""
+        width, height = int(size[0]), int(size[1])
+        side = min(width, height)
+        return cls((width - side) // 2, (height - side) // 2, side, out)
+
+    @property
+    def scale(self):
+        return self.out / self.side
+
+    def intrinsics(self, k):
+        """Intrinsics of the cropped and resized view."""
+        s = self.scale
+        return Intrinsics(k.fx * s, k.fy * s, (k.cx - self.x0 + 0.5) * s - 0.5, (k.cy - self.y0 + 0.5) * s - 0.5)
+
+    def point(self, u, v):
+        """A pixel position in the full frame -> position in the model input."""
+        s = self.scale
+        return (u - self.x0 + 0.5) * s - 0.5, (v - self.y0 + 0.5) * s - 0.5
+
+    def contains(self, u, v):
+        """True if a full-frame pixel position falls inside the centre square."""
+        return (self.x0 - 0.5 <= u < self.x0 + self.side - 0.5) and (self.y0 - 0.5 <= v < self.y0 + self.side - 0.5)
+
+    def crop(self, array):
+        """The centre square of an [H, W, ...] array, without resizing."""
+        return array[self.y0 : self.y0 + self.side, self.x0 : self.x0 + self.side]
+
+    def resize_nearest(self, array):
+        """Centre-crop a per-pixel map and resize it to the model input with nearest neighbour."""
+        return nearest_resize(self.crop(array), (self.out, self.out))
+
+
+def check_same_aspect(image_size, depth_size, tolerance=0.01):
+    """Raise if image and depth map differ in aspect ratio: their centre squares would then
+    cover different physical areas and the depth labels would be misaligned."""
+    image_ratio = image_size[0] / image_size[1]
+    depth_ratio = depth_size[0] / depth_size[1]
+    if abs(image_ratio / depth_ratio - 1) > tolerance:
+        raise ValueError(
+            f"image {image_size[0]}x{image_size[1]} and depth map {depth_size[0]}x{depth_size[1]} have different "
+            "aspect ratios, so their centre crops would not cover the same area"
+        )
+
+
+def objects_outside_crop(meta):
+    """Indices of the objects in a sample's meta.json whose tap lies outside the centre square."""
+    crop = CenterSquareCrop.for_size(meta["image_size"])
+    return [i for i, obj in enumerate(meta["objects"]) if not crop.contains(*obj["tap_point_image"])]
+
+
 def backproject(u, v, z, fx, fy, cx, cy):
     """Pixel coordinates and depth along the optical axis -> camera-space (X, Y, Z).
 

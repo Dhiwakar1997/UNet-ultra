@@ -13,7 +13,9 @@ LiDAR is used only to create training labels and as ground truth for scoring. Th
 receives depth as an input. The PoC object is one closed AirPods case in one cover, at about
 15–70 cm.
 
-**Status:** phase 0 (scaffold). See [Phases](#phases).
+**Status:** all seven phases of the main brief are written. The Python side is tested on
+synthetic data; the iOS app has not been compiled yet, and nothing has run on real captures.
+See [What has and has not been verified](#what-has-and-has-not-been-verified).
 
 ## How it fits together
 
@@ -31,6 +33,13 @@ tap points                      03_evaluate   separate test zip           mask, 
   to metres; the model sees the calibrated distance, never the raw reading.
 - **Geometry is computed, not learned:** the model predicts a mask and per-pixel depth; distance
   and size come from pinhole back-projection with the frame's own fx, fy, cx, cy.
+- **The model sees a square.** Frames are captured and stored whole (4:3, for example
+  1920×1440). Pre-processing, identical in the Python dataset and in the app, takes the centre
+  square of the frame and resizes it to **512×512**; intrinsics and tap points go through the
+  same transform (`geometry.CenterSquareCrop`). Depth, labels and instance maps are each
+  centre-cropped to their own square and resized with nearest neighbour. An object tapped
+  outside the square cannot be used: the app refuses such taps, and already-captured samples
+  are reported as `excluded_outside_crop` by the validator and the dataset loader.
 - **Splits are by capture session**, never by frame. The test zip comes from a different room or
   day and is never touched during training or calibration.
 
@@ -57,27 +66,72 @@ source .venv/bin/activate
 ```
 
 ```bash
-pip install -e ".[dev,notebooks]"
+pip install -e ".[all]"
 ```
 
 ```bash
 pytest
 ```
 
-Make a synthetic session and check it against the data contract:
+`[all]` adds Jupyter, scikit-learn, `transformers` (SAM 2.1) and `coremltools` to the core
+dependencies (PyTorch, torchvision, NumPy, SciPy, Pillow).
+
+## Workflow
+
+### 1. Capture on the phone, export, check
+
+Capture a session in the app's **Capture** tab (see [Using the app](#using-the-app)), export the
+zip, and put it in `data/`. Then:
 
 ```bash
-python tools/make_fake_session.py data/session_fake_train.zip --with-masks
+python -m unetultra.validate data/session_<id>.zip
 ```
 
 ```bash
-python -m unetultra.validate data/session_fake_train.zip
+python -m unetultra.capture_report data/session_<id>.zip --out data/report
 ```
 
-The fake session uses exactly the real format (flat shapes of known size at 15–70 cm, some
-photos with two objects, some background-only), so every notebook can be built and tested
-before real captures exist. Without `--with-masks` the masks are "pending", as they are when a
-zip leaves the phone.
+The first command checks every sample against the data contract. The second writes one overlay
+per sample (depth edges in red on the photo: they should trace the object's outline) and prints
+how many valid LiDAR pixels land on the object at each distance, with a safe minimum distance.
+
+You need at least **two training sessions** (one whole session is held out for validation) and
+one **test session** from a different room or day, marked *test* when you start it in the app.
+
+### 2. Notebooks
+
+```bash
+jupyter lab notebooks
+```
+
+| Notebook | What it does | Output |
+| --- | --- | --- |
+| `01_masks` | SAM 2.1 mask per tapped object; review grid; extra clicks to fix a mask | `labels.png`, `instances.png`, `mask_status` written into each zip |
+| `02_train` | Lens calibration; trains the model and the image-only ablation | `models/calibration.json`, `models/model.pt`, `models/model_image_only.pt` |
+| `03_evaluate` | Scores both models and the focus-only baseline on the test zip | metrics, plots, a generated verdict |
+| `04_export_coreml` | Converts to Core ML, compares with PyTorch, copies files for the app | `models/UNetUltra.mlpackage` |
+
+The notebooks are generated from `tools/build_notebooks.py`; edit that file and re-run it rather
+than editing the `.ipynb` JSON by hand if you want clean diffs.
+
+### 3. Try it without a phone
+
+```bash
+python tools/make_fake_session.py data/session_fake_train0.zip --seed 0 --with-masks
+```
+
+```bash
+python tools/make_fake_session.py data/session_fake_train1.zip --seed 1 --with-masks
+```
+
+```bash
+python tools/make_fake_session.py data/session_fake_test.zip --seed 9 --split test --with-masks
+```
+
+The fake sessions use exactly the real format (flat shapes of known size at 15–70 cm, some
+photos with two objects, some background-only), so notebooks 02–04 run on them as they are.
+Leave out `--with-masks` to get "pending" masks, as when a zip leaves the phone, and exercise
+`01_masks`.
 
 ## Xcode setup
 
@@ -104,6 +158,38 @@ xcodebuild -project ios/UNetUltra/UNetUltra.xcodeproj -scheme UNetUltra -destina
 The project uses file-system-synchronised groups (Xcode 16+): any file added under
 `ios/UNetUltra/UNetUltra/` is part of the app without editing the project file.
 
+## Using the app
+
+### Capture tab
+
+1. On first launch allow camera access. A session sheet opens: keep the class list
+   (`airpods_case`), choose **train** or **test**, and start the session.
+2. Keep the case inside the square guide (the region the model sees; the rest is dimmed) and
+   tap it. A tap outside the square is refused. The lens focuses there and a numbered marker appears; the status
+   line shows the lens position and the LiDAR distance at the tap. Tap more objects if there are
+   several.
+3. Press **Capture** to save one synchronized RGB + depth sample. Press **No object** for a
+   background-only sample (aim for about 1 in 10).
+4. The ruler button holds optional measured width, height, facing and distance.
+5. The gallery button shows thumbnails with tap markers; touch and hold one to delete it.
+6. The share button exports `session_<id>.zip` (AirDrop it to the Mac and move it to `data/`).
+
+The question-mark button shows the capture checklist: case closed in the same cover; 15–70 cm
+with varied distance, angle and visible face; lying flat, standing and held in the hand; varied
+surfaces, backgrounds and lighting.
+
+### Inference tab
+
+1. Run `04_export_coreml`. It copies `UNetUltra.mlpackage` and `calibration.json` into
+   `ios/UNetUltra/UNetUltra/Resources/`; rebuild and run the app. (Both can also be imported
+   from Files inside the tab.)
+2. Point at the case, keep it inside the square guide, and tap it. When focus settles the model
+   runs on that frame.
+3. The screen shows the mask overlay, the predicted distance and width × height, and beside them
+   the LiDAR distance over the same pixels, labelled as a reference the model does not use.
+4. **Log result** appends the prediction, the LiDAR reference and any measured values to a CSV
+   you can export.
+
 ## Data format
 
 One zip per capture session; this is the contract between the app and the notebooks, checked by
@@ -126,20 +212,22 @@ orientation recorded separately, so the intrinsics stay valid for the saved imag
 is always background; the format supports several classes and several objects per photo, while
 the PoC trains one class.
 
-Pixel convention in the Python code: integer coordinates are pixel centres. Resizing scales the
-principal point as `(c + 0.5) * s - 0.5`; a horizontal flip maps `cx` to `W - 1 - cx`.
+Pixel convention in the Python code: integer coordinates are pixel centres. For a frame of
+width W and height H, with `S = min(W, H)`, `x0 = (W - S) / 2`, `y0 = (H - S) / 2` and
+`s = 512 / S`, the model's intrinsics are `fx * s`, `fy * s`, `(cx - x0 + 0.5) * s - 0.5` and
+`(cy - y0 + 0.5) * s - 0.5`, and points move the same way. A horizontal flip maps `cx` to
+`511 - cx`.
 
-## Phases
+## What has and has not been verified
 
-| Phase | What | State |
-| --- | --- | --- |
-| 0 | Scaffold: package, fake session, validator, tests, Xcode project | done |
-| 1 | iOS Capture tab and zip export | |
-| 2 | `01_masks.ipynb`: SAM 2 masks from taps, review | |
-| 3 | `02_train.ipynb`: lens calibration and training | |
-| 4 | `03_evaluate.ipynb`: evaluation on a separate test zip | |
-| 5 | `04_export_coreml.ipynb`: Core ML export | |
-| 6 | iOS Inference tab | |
+| Part | State |
+| --- | --- |
+| Python package and tests (`pytest`) | Passing, on synthetic data only |
+| Notebooks 02–04 | Executed end to end on synthetic sessions |
+| Notebook 01 | Executed with a stand-in for SAM; real SAM 2.1 weights have not been run |
+| Core ML conversion | Converts; the Core ML vs PyTorch comparison needs macOS and has not been run |
+| iOS app (both tabs) and Swift tests | Written, never compiled or run |
+| Anything on real captures | Not done: no real session exists yet |
 
 ## Honest limits
 

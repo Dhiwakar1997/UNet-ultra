@@ -114,3 +114,70 @@ def test_robust_size_survives_background_depth_on_the_edges():
     w, _, d = object_size_robust_m(mask, depth, K.fx, K.fy, K.cx, K.cy)
     assert raw_w > 0.08  # the reference method is thrown far off
     assert w == pytest.approx(0.05, rel=0.04) and d == pytest.approx(0.4)
+
+
+# ---- centre-square crop (the model's view of a frame) ----
+
+def test_crop_maps_centre_and_edges():
+    from unetultra.geometry import CenterSquareCrop
+
+    crop = CenterSquareCrop.for_size((1920, 1440))
+    assert (crop.x0, crop.y0, crop.side, crop.out) == (240, 0, 1440, 512)
+    assert crop.point(959.5, 719.5) == pytest.approx((255.5, 255.5))  # image centre
+    assert crop.point(239.5, -0.5) == pytest.approx((-0.5, -0.5))  # left/top edge of the crop
+    assert crop.point(1679.5, 1439.5) == pytest.approx((511.5, 511.5))  # right/bottom edge
+    assert crop.contains(240, 0) and crop.contains(1679, 1439)
+    assert not crop.contains(239, 700) and not crop.contains(1680, 700)
+
+
+def test_crop_intrinsics_follow_the_formula():
+    from unetultra.geometry import CenterSquareCrop
+
+    k = CenterSquareCrop.for_size((1920, 1440)).intrinsics(Intrinsics(1450.0, 1452.0, 972.0, 708.0))
+    s = 512 / 1440
+    assert k.to_dict() == pytest.approx(
+        {"fx": 1450 * s, "fy": 1452 * s, "cx": (972 - 240 + 0.5) * s - 0.5, "cy": (708 + 0.5) * s - 0.5})
+
+
+def test_crop_of_a_portrait_or_depth_sized_map():
+    from unetultra.geometry import CenterSquareCrop
+
+    depth_crop = CenterSquareCrop.for_size((256, 192))
+    assert (depth_crop.x0, depth_crop.y0, depth_crop.side) == (32, 0, 192)
+    grid = np.arange(192 * 256).reshape(192, 256)
+    assert depth_crop.crop(grid).shape == (192, 192) and depth_crop.crop(grid)[0, 0] == 32
+    assert depth_crop.resize_nearest(grid).shape == (512, 512)
+    tall = CenterSquareCrop.for_size((1440, 1920))
+    assert (tall.x0, tall.y0, tall.side) == (0, 240, 1440)
+
+
+def test_object_measures_the_same_before_and_after_the_crop():
+    """A square of known size and distance: same answer on the full frame and on the model's crop."""
+    from unetultra.geometry import CenterSquareCrop, object_size_robust_m
+
+    k = Intrinsics(fx=1450.0, fy=1450.0, cx=972.0, cy=708.0)
+    side_m, z = 0.055, 0.35
+    full_mask = np.zeros((1440, 1920), dtype=bool)
+    half = k.fx * side_m / (2 * z)
+    u0, v0 = 1100, 600
+    full_mask[round(v0 - half) : round(v0 + half) + 1, round(u0 - half) : round(u0 + half) + 1] = True
+    full_depth = np.where(full_mask, z, 1.3).astype(np.float32)
+    before = object_size_robust_m(torch.from_numpy(full_mask), torch.from_numpy(full_depth), k.fx, k.fy, k.cx, k.cy)
+
+    crop = CenterSquareCrop.for_size((1920, 1440))
+    k_crop = crop.intrinsics(k)
+    mask = torch.from_numpy(crop.resize_nearest(full_mask))
+    depth = torch.from_numpy(crop.resize_nearest(full_depth))
+    after = object_size_robust_m(mask, depth, k_crop.fx, k_crop.fy, k_crop.cx, k_crop.cy)
+    one_model_pixel = z / k_crop.fx
+    assert after[2] == pytest.approx(before[2]) == pytest.approx(z)
+    # Resampling can move each edge by up to half a model pixel, so allow 1.5 pixels in total.
+    assert after[0] == pytest.approx(before[0], abs=1.5 * one_model_pixel)
+    assert after[1] == pytest.approx(before[1], abs=1.5 * one_model_pixel)
+    assert after[0] == pytest.approx(side_m, abs=one_model_pixel)
+    # The object's centre back-projects to the same 3D point through either set of intrinsics.
+    rows, cols = np.nonzero(full_mask)
+    v_c, u_c = torch.nonzero(mask, as_tuple=True)
+    x_full, y_full, _ = backproject(cols.mean(), rows.mean(), z, **k.to_dict())
+    x_crop, y_crop, _ = backproject(float(u_c.float().mean()), float(v_c.float().mean()), z, **k_crop.to_dict())
+    assert (x_crop, y_crop) == pytest.approx((x_full, y_full), abs=one_model_pixel)

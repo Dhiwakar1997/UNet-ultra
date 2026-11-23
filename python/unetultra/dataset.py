@@ -1,7 +1,9 @@
-"""Training dataset: accepted samples from session zips, resized to the model input.
+"""Training dataset: accepted samples from session zips, cropped and resized to the model input.
 
-Images are resized to 512x384 with the intrinsics scaled to match; depth, labels and instances
-are resized with nearest neighbour. The model's inputs are the image and the meta vector only.
+Pre-processing takes the centre square of each frame and resizes it to 512x512, with the
+intrinsics transformed to match (geometry.CenterSquareCrop). Depth, labels and instances are
+centre-cropped to their own squares and resized with nearest neighbour. Stored data is never
+cropped. The model's inputs are the image and the meta vector only.
 """
 
 import numpy as np
@@ -10,11 +12,11 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 from torch.utils.data import Dataset
 
-from .geometry import Intrinsics, nearest_resize
-from .model import INPUT_HEIGHT, INPUT_WIDTH
+from .geometry import MODEL_INPUT, CenterSquareCrop, Intrinsics, check_same_aspect, objects_outside_crop
 from .session import IGNORE_LABEL, Session
 
-MODEL_SIZE = (INPUT_WIDTH, INPUT_HEIGHT)
+MODEL_SIZE = MODEL_INPUT
+EXCLUDED_OUTSIDE_CROP = "excluded_outside_crop"
 
 
 def meta_vector(focus_distance_m, fx_model):
@@ -22,9 +24,10 @@ def meta_vector(focus_distance_m, fx_model):
     return np.array([np.log(focus_distance_m), fx_model / 1000.0 - 1.0], dtype=np.float32)
 
 
-def resize_image(image, size=MODEL_SIZE):
-    """Resize a uint8 RGB image to the model input size (antialiased bilinear)."""
-    return np.asarray(Image.fromarray(image).resize(size, Image.BILINEAR))
+def preprocess_image(image, size=MODEL_SIZE):
+    """Centre-square crop of a uint8 RGB frame, resized to size x size (antialiased bilinear)."""
+    crop = CenterSquareCrop.for_size((image.shape[1], image.shape[0]), size)
+    return np.asarray(Image.fromarray(crop.crop(image)).resize((size, size), Image.BILINEAR))
 
 
 def image_to_tensor(image):
@@ -65,6 +68,9 @@ class SessionDataset(Dataset):
     instances [H, W], depth [H, W] in metres (training label only), depth_valid [H, W],
     intrinsics [fx, fy, cx, cy] at the model size, plus focus_distance_m, lens_position and ids.
     With use_meta=False the meta vector is zeroed (the image-only ablation).
+
+    Samples with an object tapped outside the centre square cannot be used; they are listed in
+    `excluded` as (path, sample_id, "excluded_outside_crop") rather than silently dropped.
     """
 
     def __init__(self, paths, calibration, augment=False, use_meta=True, size=MODEL_SIZE, seed=0):
@@ -72,9 +78,9 @@ class SessionDataset(Dataset):
         self.calibration = calibration
         self.augment = augment
         self.use_meta = use_meta
-        self.size = tuple(size)
+        self.size = int(size)
         self.generator = torch.Generator().manual_seed(seed)
-        self.refs, self.classes, self.skipped = [], None, 0
+        self.refs, self.classes, self.skipped, self.excluded = [], None, 0, []
         for path in self.paths:
             with Session(path) as sess:
                 if self.classes is None:
@@ -82,10 +88,12 @@ class SessionDataset(Dataset):
                 elif list(sess.classes) != self.classes:
                     raise ValueError(f"{path} has classes {sess.classes}, expected {self.classes}")
                 for sample_id in sess.sample_ids:
-                    if sess.mask_status(sample_id) == "accepted" and sess.has(sample_id, "labels.png"):
-                        self.refs.append((path, sample_id))
-                    else:
+                    if not (sess.mask_status(sample_id) == "accepted" and sess.has(sample_id, "labels.png")):
                         self.skipped += 1
+                    elif objects_outside_crop(sess.meta(sample_id)):
+                        self.excluded.append((path, sample_id, EXCLUDED_OUTSIDE_CROP))
+                    else:
+                        self.refs.append((path, sample_id))
         self._cache = {}
 
     @property
@@ -100,15 +108,18 @@ class SessionDataset(Dataset):
         path, sample_id = self.refs[index]
         with Session(path) as sess:
             meta = sess.meta(sample_id)
-            image_size = tuple(meta["image_size"])
-            k = Intrinsics.from_dict(meta["intrinsics_image"]).scaled(image_size, self.size)
+            image_size, depth_size = tuple(meta["image_size"]), tuple(meta["depth_size"])
+            check_same_aspect(image_size, depth_size)
+            image_crop = CenterSquareCrop.for_size(image_size, self.size)
+            depth_crop = CenterSquareCrop.for_size(depth_size, self.size)
+            k = image_crop.intrinsics(Intrinsics.from_dict(meta["intrinsics_image"]))
             focus = float(self.calibration.focus_distance_m(meta["lens_position"]))
             return {
-                "image": resize_image(sess.image(sample_id), self.size),
-                "labels": nearest_resize(sess.labels(sample_id), self.size),
-                "instances": nearest_resize(sess.instances(sample_id), self.size),
-                "depth": nearest_resize(sess.depth_m(sample_id), self.size),
-                "depth_valid": nearest_resize(sess.depth_valid(sample_id), self.size),
+                "image": preprocess_image(sess.image(sample_id), self.size),
+                "labels": image_crop.resize_nearest(sess.labels(sample_id)),
+                "instances": image_crop.resize_nearest(sess.instances(sample_id)),
+                "depth": depth_crop.resize_nearest(sess.depth_m(sample_id)),
+                "depth_valid": depth_crop.resize_nearest(sess.depth_valid(sample_id)),
                 "intrinsics": np.array([k.fx, k.fy, k.cx, k.cy], dtype=np.float32),
                 "meta": meta_vector(focus, k.fx),
                 "focus_distance_m": focus,
@@ -150,4 +161,4 @@ class SessionDataset(Dataset):
         return item
 
 
-__all__ = ["SessionDataset", "meta_vector", "resize_image", "image_to_tensor", "augment", "MODEL_SIZE", "IGNORE_LABEL"]
+__all__ = ["SessionDataset", "meta_vector", "preprocess_image", "image_to_tensor", "augment", "MODEL_SIZE", "IGNORE_LABEL"]

@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image
 
 from . import session as fmt
-from .geometry import Intrinsics, nearest_resize
+from .geometry import CenterSquareCrop, Intrinsics, nearest_resize
 
 # Roughly an iPhone 1x wide camera at 1920x1440, with an off-centre principal point so that
 # code which wrongly assumes the image centre fails the tests.
@@ -39,21 +39,28 @@ def _png_bytes(array):
     return buffer.getvalue()
 
 
-def _place_object(rng, k, size, taken):
-    """Pick a size, distance and position for one object that fits in the image and avoids `taken`.
+def _place_object(rng, k, size, taken, outside=False):
+    """Pick a size, distance and position for one object that avoids `taken`.
 
+    Normally the whole object lies inside the centre square the model sees. With outside=True
+    it is placed in the strip beside the square instead, to exercise the exclusion rule.
     Returns a dict with the metric truth and the pixel-space half-extents, or None if no room."""
     width, height = size
-    for _ in range(50):
+    crop = CenterSquareCrop.for_size(size)
+    for _ in range(200):
         w_m = rng.uniform(0.045, 0.065)
         h_m = rng.uniform(0.045, 0.065)
-        z = rng.uniform(MIN_DISTANCE_M, MAX_DISTANCE_M)
+        z = rng.uniform(0.5, MAX_DISTANCE_M) if outside else rng.uniform(MIN_DISTANCE_M, MAX_DISTANCE_M)
         half_u, half_v = k.fx * w_m / (2 * z), k.fy * h_m / (2 * z)
         margin = 6
-        if 2 * (half_u + margin) >= width or 2 * (half_v + margin) >= height:
+        if outside:
+            lo, hi = half_u + margin, crop.x0 - 2.0
+        else:
+            lo, hi = crop.x0 + half_u + margin, crop.x0 + crop.side - 1 - half_u - margin
+        if lo >= hi or 2 * (half_v + margin) >= crop.side:
             continue
-        u0 = rng.uniform(half_u + margin, width - 1 - half_u - margin)
-        v0 = rng.uniform(half_v + margin, height - 1 - half_v - margin)
+        u0 = rng.uniform(lo, hi)
+        v0 = rng.uniform(crop.y0 + half_v + margin, crop.y0 + crop.side - 1 - half_v - margin)
         box = (u0 - half_u - margin, v0 - half_v - margin, u0 + half_u + margin, v0 + half_v + margin)
         if any(box[0] < t[2] and t[0] < box[2] and box[1] < t[3] and t[1] < box[3] for t in taken):
             continue
@@ -65,7 +72,7 @@ def _place_object(rng, k, size, taken):
     return None
 
 
-def _render_sample(rng, k, size, depth_size, n_objects, n_classes):
+def _render_sample(rng, k, size, depth_size, n_objects, n_classes, outside=False):
     """Render one sample. Returns image, depth_mm, confidence, labels, instances and object dicts."""
     width, height = size
     uu, vv = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
@@ -80,7 +87,7 @@ def _render_sample(rng, k, size, depth_size, n_objects, n_classes):
 
     placed, taken = [], []
     for _ in range(n_objects):
-        obj = _place_object(rng, k, size, taken)
+        obj = _place_object(rng, k, size, taken, outside=outside)
         if obj is not None:
             placed.append(obj)
     # Paint far-to-near; boxes never overlap, so the order only matters for consistency.
@@ -121,7 +128,9 @@ def make_fake_session(
 ):
     """Write a synthetic session zip to out_path and return the path.
 
-    About 15% of samples are background-only and about 25% hold two objects. With
+    About 15% of samples are background-only and about 25% hold two objects. Objects sit
+    inside the centre square the model sees, except in every tenth sample (index 3, 13, ...),
+    whose single object is deliberately tapped outside it. With
     with_masks=True the true labels.png / instances.png are included and marked accepted;
     otherwise masks are "pending", as they are when a zip leaves the phone.
     """
@@ -136,6 +145,8 @@ def make_fake_session(
     counts = rng.choice([0, 1, 2], size=n_samples, p=[0.15, 0.60, 0.25])
     if n_samples >= 3:
         counts[:3] = [1, 2, 0]
+    outside = [i % 10 == 3 for i in range(n_samples)]
+    counts[outside] = 1
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,7 +155,7 @@ def make_fake_session(
         for i, n_objects in enumerate(counts):
             sample_id = f"{i:04d}"
             image, depth_mm, confidence, labels, instances, objects, wall_z = _render_sample(
-                rng, k_image, image_size, depth_size, int(n_objects), len(classes)
+                rng, k_image, image_size, depth_size, int(n_objects), len(classes), outside=outside[i]
             )
             focus_distance = objects[0]["z"] if objects else wall_z
             lens = float(np.clip(fake_lens_position(focus_distance) + rng.normal(0, 0.004), 0, 1))

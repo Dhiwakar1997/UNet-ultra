@@ -244,6 +244,9 @@ def verdict(full, image_only, object_rows, good_percent=10.0):
     baseline, on_targets = full["distance_focus_baseline"], full["distance_model_on_focus_targets"]
     if d_full["n"] == 0:
         return "No objects were detected, so there is nothing to judge yet."
+    if full.get("missed_fraction", 0) > 0.5:
+        lines.append(f"Caution: {full['missed_fraction']:.0%} of objects were missed, so the numbers below rest on "
+                     f"only {d_full['n']} detected object(s) and say little. Train longer or check the masks.")
     if np.isfinite(d_ablation["mae"]) and d_ablation["mae"] > 0:
         gain = 1 - d_full["mae"] / d_ablation["mae"]
         if gain > 0.1:
@@ -270,6 +273,6 @@ def verdict(full, image_only, object_rows, good_percent=10.0):
         lines.append(f"Correlation between the lens reading and the distance error: {drift:+.2f} "
                      + ("(a trend this strong suggests the lens calibration has drifted)." if abs(drift) > 0.5
                         else "(no strong sign of calibration drift)."))
-    if full.get("missed_fraction", 0) > 0:
+    if 0 < full.get("missed_fraction", 0) <= 0.5:
         lines.append(f"{full['missed_fraction']:.0%} of objects were missed entirely.")
     return "\n".join(lines)

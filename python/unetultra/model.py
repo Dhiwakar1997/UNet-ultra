@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 
 INPUT_WIDTH = 512
-INPUT_HEIGHT = 384
+INPUT_HEIGHT = 512  # the centre square of the frame, resized (see geometry.CenterSquareCrop)
 
 
 class DoubleConv(nn.Module):
@@ -34,7 +34,7 @@ class Ups(nn.Module):
     def forward(self, x, skip):
         x = self.upsample(x)
         if x.shape != skip.shape:
-            # Never triggers at the fixed 512x384 export size; kept for training flexibility.
+            # Never triggers at the fixed 512x512 export size; kept for training flexibility.
             x = TF.resize(x, size=skip.shape[2:])
         x = torch.cat((skip, x), dim=1)
         return self.conv(x)

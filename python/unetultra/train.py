@@ -22,7 +22,8 @@ class TrainConfig:
     batch_size: int = 8
     lr: float = 1e-3
     depth_weight: float = 0.5
-    # Extra weight on depth error at object pixels. 1.0 is a plain L1 over all valid pixels.
+    # Weight of a second depth term averaged over object pixels only. The object covers about 1%
+    # of the frame, so a plain L1 over all valid pixels (object_depth_weight = 0) barely sees it.
     object_depth_weight: float = 1.0
     features: tuple = (16, 32, 64, 128)
     use_meta: bool = True
@@ -74,12 +75,17 @@ def mask_loss(logits, labels, n_classes):
 
 
 def depth_loss(pred, depth, valid, labels, object_weight=1.0):
-    """L1 on valid depth pixels, optionally weighting object pixels more than background."""
-    weight = valid.float()
-    if object_weight != 1.0:
-        is_object = (labels > 0) & (labels != IGNORE_LABEL)
-        weight = weight * (1 + (object_weight - 1) * is_object.float())
-    return ((pred[:, 0] - depth).abs() * weight).sum() / weight.sum().clamp(min=1)
+    """L1 on valid depth pixels, plus object_weight x the L1 averaged over object pixels alone.
+
+    The second term gives the object's depth a say that does not shrink with its pixel count."""
+    error = (pred[:, 0] - depth).abs()
+    everywhere = valid.float()
+    loss = (error * everywhere).sum() / everywhere.sum().clamp(min=1)
+    if object_weight:
+        on_object = (valid & (labels > 0) & (labels != IGNORE_LABEL)).float()
+        if on_object.sum() > 0:
+            loss = loss + object_weight * (error * on_object).sum() / on_object.sum()
+    return loss
 
 
 def total_loss(mask_logits, pred_depth, batch, n_classes, config):

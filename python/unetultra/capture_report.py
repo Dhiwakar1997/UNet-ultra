@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .geometry import Intrinsics, nearest_resize
+from .geometry import CenterSquareCrop, Intrinsics, nearest_resize
 from .session import Session, image_to_depth_point, lidar_at_point
 
 DEFAULT_BINS_CM = (10, 15, 20, 25, 30, 40, 50, 60, 70, 85, 100)
@@ -102,10 +102,11 @@ def format_report(rows, table):
 
 
 def depth_edge_overlay(sess, sample_id, edge_threshold_m=0.03):
-    """RGB image with depth discontinuities drawn in red, missing depth tinted blue, taps in yellow.
+    """RGB image with depth discontinuities in red, missing depth tinted blue, taps in yellow, and
+    the centre square the model sees outlined in white with the rest dimmed.
 
     If image and depth are aligned (same orientation, valid intrinsics), the red lines trace the
-    object outlines in the photo."""
+    object outlines in the photo. Reviewed masks, when present, are outlined in green."""
     meta = sess.meta(sample_id)
     image = sess.image(sample_id).copy()
     size = tuple(meta["image_size"])
@@ -118,8 +119,19 @@ def depth_edge_overlay(sess, sample_id, edge_threshold_m=0.03):
     edges &= valid
     image[~valid] = (0.6 * image[~valid] + 0.4 * np.array([40, 80, 255])).astype(np.uint8)
     image[edges] = (255, 0, 0)
+    instances = sess.instances(sample_id)
+    if instances is not None:
+        outline = np.zeros(depth.shape, dtype=bool)
+        outline[:, 1:] |= instances[:, 1:] != instances[:, :-1]
+        outline[1:, :] |= instances[1:, :] != instances[:-1, :]
+        image[outline] = (0, 255, 0)
+    crop = CenterSquareCrop.for_size(size)
+    outside = np.ones(depth.shape, dtype=bool)
+    outside[crop.y0 : crop.y0 + crop.side, crop.x0 : crop.x0 + crop.side] = False
+    image[outside] = image[outside] // 2
     picture = Image.fromarray(image)
     draw = ImageDraw.Draw(picture)
+    draw.rectangle([crop.x0, crop.y0, crop.x0 + crop.side - 1, crop.y0 + crop.side - 1], outline=(255, 255, 255), width=2)
     radius = max(4, size[0] // 160)
     for obj in meta["objects"]:
         x, y = obj["tap_point_image"]

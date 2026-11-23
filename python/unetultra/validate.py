@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import session as fmt
-from .geometry import Intrinsics
+from .geometry import Intrinsics, check_same_aspect, objects_outside_crop
 from .session import Session
 
 MANIFEST_KEYS = (
@@ -37,6 +37,8 @@ class Report:
     n_background_only: int = 0
     n_objects: int = 0
     errors: dict = field(default_factory=dict)
+    # Valid samples the dataset loader will leave out because a tap lies outside the centre square.
+    excluded_outside_crop: list = field(default_factory=list)
 
     def add(self, sample_id, message):
         self.errors.setdefault(sample_id, []).append(message)
@@ -60,6 +62,11 @@ class Report:
             f"  {self.n_valid_samples}/{self.n_samples} samples valid "
             f"({self.n_objects} objects, {self.n_background_only} background-only)"
         )
+        if self.excluded_outside_crop:
+            lines.append(
+                f"  {len(self.excluded_outside_crop)} sample(s) excluded_outside_crop (an object was tapped outside "
+                f"the centre square the model sees): {', '.join(self.excluded_outside_crop)}"
+            )
         lines.append("  OK" if self.ok else "  INVALID")
         return "\n".join(lines)
 
@@ -157,10 +164,16 @@ def _check_sample(report, sess, sample_id, n_classes):
     if not 0.0 <= meta["lens_position"] <= 1.0:
         report.add(sample_id, f"lens_position {meta['lens_position']} outside 0..1")
 
+    try:
+        check_same_aspect(meta["image_size"], meta["depth_size"])
+    except ValueError as exc:
+        report.add(sample_id, str(exc))
     _check_intrinsics(report, sample_id, meta)
     _check_objects(report, sample_id, meta, n_classes)
     _check_masks(report, sample_id, sess, meta, n_classes)
 
+    if sample_id not in report.errors and objects_outside_crop(meta):
+        report.excluded_outside_crop.append(sample_id)
     report.n_objects += len(meta["objects"])
     report.n_background_only += bool(meta["background_only"])
 

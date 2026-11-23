@@ -1,6 +1,7 @@
 """Core ML export and the PyTorch/Core ML comparison (used by 04_export_coreml.ipynb).
 
-The Core ML model takes `image` (512x384 RGB; the 1/255 scaling is built in) and `meta`
+The Core ML model takes `image` (512x512 RGB, the centre square of the frame already cropped
+and resized by the caller; the 1/255 scaling is built in) and `meta`
 ([1, 2] float32) and returns `mask_logits` and `depth` (metres). Conversion works anywhere;
 running the converted model for the comparison needs macOS.
 """
@@ -43,12 +44,13 @@ def export_coreml(model, classes, out_path, description="UNet-ultra: mask and de
         compute_precision=ct.precision.FLOAT32,
     )
     mlmodel.short_description = description
-    mlmodel.input_description[IMAGE_INPUT] = "RGB frame resized to 512x384, sensor orientation"
-    mlmodel.input_description[META_INPUT] = "[log(calibrated focus distance in m), fx at 512 wide / 1000 - 1]"
+    mlmodel.input_description[IMAGE_INPUT] = "Centre square of the RGB frame resized to 512x512, sensor orientation"
+    mlmodel.input_description[META_INPUT] = "[log(calibrated focus distance in m), fx of the 512x512 crop / 1000 - 1]"
     mlmodel.output_description[MASK_OUTPUT] = "mask logits: 1 channel, or classes + background"
     mlmodel.output_description[DEPTH_OUTPUT] = "per-pixel depth in metres"
     mlmodel.user_defined_metadata["classes"] = json.dumps(list(classes))
     mlmodel.user_defined_metadata["n_classes"] = str(model.n_classes)
+    mlmodel.user_defined_metadata["crop"] = "center_square"
     out_path = Path(out_path)
     if out_path.exists():
         shutil.rmtree(out_path)

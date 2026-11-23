@@ -17,8 +17,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
-notebooks = ["jupyter", "ipywidgets", "matplotlib", "scikit-learn"]
-# Added in later phases, after confirmation: SAM 2 (phase 2), coremltools (phase 5).
+notebooks = ["jupyter", "ipywidgets", "ipympl", "matplotlib", "scikit-learn"]
+sam = ["transformers>=4.56"]   # SAM 2.1 for 01_masks.ipynb
+coreml = ["coremltools>=8"]    # 04_export_coreml.ipynb
+all = ["unetultra[dev,notebooks,sam,coreml]"]
 
 [tool.setuptools.packages.find]
 where = ["python"]

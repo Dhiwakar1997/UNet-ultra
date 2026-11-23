@@ -12,7 +12,7 @@ from unetultra.model import UNetMulti
 from unetultra.session import Session
 from unetultra.train import TrainConfig, fit, load_model, mask_loss, split_sessions
 
-SMALL = (128, 96)
+SMALL = 128
 
 
 @pytest.fixture(scope="module")
@@ -95,6 +95,7 @@ def test_capture_report(fake_zip):
         picture = depth_edge_overlay(sess, with_object)
         assert picture.shape == sess.image(with_object).shape
         assert (picture == (255, 0, 0)).all(axis=-1).sum() > 20  # depth edges were drawn
+        assert (picture == (255, 255, 255)).all(axis=-1).sum() > 500  # the crop square was drawn
     assert rows and all(row["coverage"] > 0.8 for row in rows)
     text = format_report(rows, coverage_by_distance(rows))
     assert "Safe minimum distance" in text
