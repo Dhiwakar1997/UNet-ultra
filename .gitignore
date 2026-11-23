@@ -24,3 +24,6 @@ DerivedData/
 build/
 *.xcuserstate
 .DS_Store
+
+# Model and calibration bundled into the app locally
+ios/UNetUltra/UNetUltra/Resources/calibration.json
