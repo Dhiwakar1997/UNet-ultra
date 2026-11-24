@@ -240,3 +240,65 @@ def overlay(image, masks, taps=(), extra_points=(), alpha=0.5):
         colour = (0, 255, 0) if point["positive"] else (255, 0, 0)
         draw.ellipse([x - r // 2, y - r // 2, x + r // 2, y + r // 2], fill=colour, outline=(255, 255, 255))
     return np.asarray(picture)
+
+
+def main(argv=None):
+    """Run SAM over the tap points of session zips from a terminal and save the masks.
+
+        python -m unetultra.masks data/*.zip
+
+    Masks are saved as "pending"; open 01_masks.ipynb afterwards to review them (it then loads
+    the saved masks and does not run SAM again). Each sample is announced before SAM starts on
+    it, and if one takes longer than --stall-seconds the Python stack is printed, so a stall
+    shows exactly where it is stuck.
+    """
+    import argparse
+    import faulthandler
+    import sys
+    import time
+
+    parser = argparse.ArgumentParser(description="Make masks with SAM 2 from the saved tap points.")
+    parser.add_argument("paths", nargs="+", help="session zip(s)")
+    parser.add_argument("--model", default=DEFAULT_SAM_MODEL)
+    parser.add_argument("--device", default="cpu", help="cpu (default), mps or cuda")
+    parser.add_argument("--redo", action="store_true", help="predict again for samples that already have masks")
+    parser.add_argument("--limit", type=int, help="stop after this many samples (for a quick check)")
+    parser.add_argument("--stall-seconds", type=int, default=120)
+    args = parser.parse_args(argv)
+
+    faulthandler.enable()
+    started = time.time()
+
+    def say(message):
+        print(f"[{time.time() - started:6.0f}s] {message}", flush=True)
+
+    say("reading sessions")
+    review = MaskReview(args.paths, predictor=None)
+    todo = [item for item in review.items if item.meta["objects"] and (args.redo or not item.masks)]
+    if args.limit:
+        todo = todo[: args.limit]
+    say(f"{len(review.items)} samples, {len(todo)} need masks")
+    if todo:
+        say(f"loading {args.model} on {args.device} (the first run downloads about 180 MB)")
+        review.predictor = Sam2Predictor(args.model, device=args.device)
+        say("SAM 2 loaded")
+    for n, item in enumerate(todo, start=1):
+        say(f"{n}/{len(todo)}  sample {item.sample_id}  ({len(item.meta['objects'])} object(s))")
+        faulthandler.dump_traceback_later(args.stall_seconds, file=sys.stderr)
+        image = review.image(item)
+        item.masks = [review._predict_object(image, obj) for obj in item.meta["objects"]]
+        faulthandler.cancel_dump_traceback_later()
+        item.status, item.dirty = "pending", True
+        if n % 25 == 0:
+            review.save()
+            say("saved so far")
+    for item in review.items:  # background-only samples need no mask
+        if not item.meta["objects"] and item.status == "pending":
+            item.status, item.dirty = "accepted", True
+    say(f"saving: {review.save()}")
+    say("done. Review the masks in notebooks/01_masks.ipynb")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -101,7 +101,16 @@ start it in the app. With a single training session, `02_train` holds out the la
 samples for validation; those numbers flatter the model, so trust only the test session. Two or
 more training sessions give a proper whole-session validation split.
 
-### 2. Notebooks
+### 2. Masks from the terminal (optional, recommended)
+
+```bash
+python -m unetultra.masks data/*.zip
+```
+
+Runs SAM 2.1 over every tapped object and saves the masks as "pending", printing one line per
+sample. `01_masks` then only has to show them for review. Add `--limit 3` for a quick check.
+
+### 3. Notebooks
 
 ```bash
 jupyter lab notebooks
@@ -117,7 +126,7 @@ jupyter lab notebooks
 The notebooks are generated from `tools/build_notebooks.py`; edit that file and re-run it rather
 than editing the `.ipynb` JSON by hand if you want clean diffs.
 
-### 3. Try it without a phone
+### 4. Try it without a phone
 
 ```bash
 python tools/make_fake_session.py data/session_fake_train0.zip --seed 0 --with-masks
