@@ -24,12 +24,14 @@ def pick_device():
 
 
 class Sam2Predictor:
-    """Point-prompted SAM 2.1 through Hugging Face transformers, with MPS and CPU fallback.
+    """Point-prompted SAM 2.1 through Hugging Face transformers.
 
+    Runs on the CPU unless another device is asked for: it takes a second or two per object
+    there, while SAM 2 on Apple's MPS backend has been seen to stall. Pass device="mps" to try it.
     The image embedding is not cached; one call encodes the image once and decodes one object.
     """
 
-    def __init__(self, model_id=DEFAULT_SAM_MODEL, device=None, model=None, processor=None):
+    def __init__(self, model_id=DEFAULT_SAM_MODEL, device="cpu", model=None, processor=None):
         import torch
         from transformers import Sam2Model, Sam2Processor
 
@@ -155,11 +157,11 @@ class MaskReview:
                 continue
             if item.masks and not redo:
                 continue
+            if progress:
+                progress(n + 1, len(self.items), item.sample_id)
             image = self.image(item)
             item.masks = [self._predict_object(image, obj) for obj in objects]
             item.status, item.dirty = "pending", True
-            if progress:
-                progress(n + 1, len(self.items))
 
     def add_click(self, key, object_index, x, y, positive=True):
         """Add a corrective click to one object and re-run SAM for it."""

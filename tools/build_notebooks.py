@@ -61,15 +61,21 @@ for path in ZIPS:
     code("""
 from unetultra.masks import Sam2Predictor
 
-predictor = Sam2Predictor("facebook/sam2.1-hiera-small")   # or "facebook/sam2.1-hiera-base-plus"
+# CPU is the safe choice (a second or two per object). device="mps" can be faster but has been seen to stall.
+predictor = Sam2Predictor("facebook/sam2.1-hiera-small", device="cpu")   # or "facebook/sam2.1-hiera-base-plus"
 print("SAM 2 running on", predictor.device)
 """, tag="predictor"),
     code("""
 from unetultra.masks import MaskReview
 
+import time
+
 review = MaskReview(ZIPS, predictor)
-review.run(progress=lambda done, total: print(f"\\r{done}/{total}", end=""))
-print()
+started = time.time()
+# One line per sample, printed before SAM runs on it, so a stall is visible straight away.
+review.run(progress=lambda done, total, sample_id: print(
+    f"{done}/{total}  sample {sample_id}  ({time.time() - started:.0f}s so far)", flush=True))
+print(f"done in {time.time() - started:.0f}s")
 review.counts()
 """),
     md("""
