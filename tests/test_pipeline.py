@@ -118,7 +118,16 @@ def test_single_session_fallback_holds_out_the_last_block(fake_zips, calibration
 
     one = fake_zips["train"][:1]
     train_indices, val_indices = split_single_session(SessionDataset(one, calibration, size=SMALL))
-    assert val_indices == [7, 8] and train_indices == list(range(7))  # contiguous, last, never shuffled
+    full = SessionDataset(one, calibration, size=SMALL)
+    is_background = [full.sample_meta(i)["background_only"] for i in range(len(full))]
+    objects = [i for i in range(len(full)) if not is_background[i]]
+    assert sorted(train_indices + val_indices) == list(range(len(full))) and not set(train_indices) & set(val_indices)
+    # The held-out object samples are the last ones captured, as a block, never shuffled.
+    held_objects = [i for i in val_indices if not is_background[i]]
+    assert held_objects == objects[-len(held_objects):] and len(held_objects) >= 2
+    # Training keeps a no-object sample whenever the session has at least two.
+    if sum(is_background) >= 2:
+        assert any(is_background[i] for i in train_indices) and any(is_background[i] for i in val_indices)
     train = Subset(SessionDataset(one, calibration, augment=True, size=SMALL), train_indices)
     val = Subset(SessionDataset(one, calibration, size=SMALL), val_indices)
     history, best = fit(train, val, TrainConfig(epochs=1, batch_size=4, features=(8, 16)), tmp_path, name="one",
@@ -126,3 +135,15 @@ def test_single_session_fallback_holds_out_the_last_block(fake_zips, calibration
     assert len(history) == 1 and load_model(best)[1]["classes"] == ["background", "airpods_case"]
     with pytest.raises(ValueError, match="at least 8"):
         split_single_session(list(range(5)))
+
+
+def test_batches_move_to_a_device_without_float64(fake_zips, calibration):
+    """MPS has no float64; the collated focus distance and lens position must be converted."""
+    from torch.utils.data import DataLoader
+    from unetultra.train import _to_device
+
+    batch = next(iter(DataLoader(SessionDataset(fake_zips["train"][:1], calibration, size=SMALL), batch_size=4)))
+    assert batch["focus_distance_m"].dtype == torch.float64  # the trap
+    moved = _to_device(batch, "cpu")
+    assert all(v.dtype != torch.float64 for v in moved.values() if torch.is_tensor(v))
+    assert moved["sample_id"] == batch["sample_id"]

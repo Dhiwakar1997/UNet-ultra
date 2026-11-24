@@ -66,8 +66,17 @@ def split_single_session(dataset, val_fraction=0.2):
     n = len(dataset)
     if n < 8:
         raise ValueError(f"only {n} usable samples; need at least 8 to hold some out for validation")
-    n_val = max(2, round(n * val_fraction))
-    return list(range(n - n_val)), list(range(n - n_val, n))
+    # Object samples and no-object samples are held out separately (the last block of each), so
+    # training still gets no-object samples even if they were all captured at the end.
+    background = [bool(dataset.sample_meta(i)["background_only"]) if hasattr(dataset, "sample_meta") else False
+                  for i in range(n)]
+    train, val = [], []
+    for group in ([i for i in range(n) if not background[i]], [i for i in range(n) if background[i]]):
+        n_val = max(1, round(len(group) * val_fraction)) if len(group) >= 2 else 0
+        n_val = max(n_val, 2) if group and not background[group[0]] else n_val
+        train += group[: len(group) - n_val]
+        val += group[len(group) - n_val :]
+    return sorted(train), sorted(val)
 
 
 def soft_dice_loss(probability, target, weight):
@@ -111,7 +120,15 @@ def total_loss(mask_logits, pred_depth, batch, n_classes, config):
 
 
 def _to_device(batch, device):
-    return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+    """Move a batch's tensors to the device. float64 becomes float32 first: MPS has no float64."""
+    moved = {}
+    for key, value in batch.items():
+        if torch.is_tensor(value):
+            if value.dtype == torch.float64:
+                value = value.float()
+            value = value.to(device)
+        moved[key] = value
+    return moved
 
 
 def foreground(mask_logits, n_classes):
@@ -137,14 +154,17 @@ def validate(model, loader, device, config):
         true_fg = (batch["labels"] > 0) & (batch["labels"] != IGNORE_LABEL)
         intersection += float((pred_fg & true_fg).sum())
         total += float(pred_fg.sum() + true_fg.sum())
-        for b in range(len(batch["image"])):
-            for index in batch["instances"][b].unique().tolist():
+        # Per-object statistics on the CPU: unique and median are not reliable on every backend.
+        instances, valid = batch["instances"].cpu(), batch["depth_valid"].cpu()
+        predicted_depth, true_depth = pred_depth[:, 0].float().cpu(), batch["depth"].cpu()
+        for b in range(len(instances)):
+            for index in instances[b].unique().tolist():
                 if index == 0:
                     continue
-                region = (batch["instances"][b] == index) & batch["depth_valid"][b]
+                region = (instances[b] == index) & valid[b]
                 if region.sum() >= 5:
-                    predicted = pred_depth[b, 0][region].median()
-                    errors.append(abs(float(predicted - batch["depth"][b][region].median())) * 100)
+                    predicted = predicted_depth[b][region].median()
+                    errors.append(abs(float(predicted - true_depth[b][region].median())) * 100)
     return {
         "val_loss": float(np.mean(losses)) if losses else float("nan"),
         "val_dice": 2 * intersection / total if total else 1.0,
