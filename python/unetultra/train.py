@@ -12,12 +12,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .masks import pick_device
-from .model import UNetMulti
+from .models import build_model
 from .session import IGNORE_LABEL, Session
 
 
 @dataclass
 class TrainConfig:
+    # A name from unetultra.models.ARCHITECTURES: "unet_multi", "image_only" or "unet_embed".
+    architecture: str = "unet_multi"
     epochs: int = 60
     batch_size: int = 8
     lr: float = 1e-3
@@ -26,8 +28,10 @@ class TrainConfig:
     # of the frame, so a plain L1 over all valid pixels (object_depth_weight = 0) barely sees it.
     object_depth_weight: float = 1.0
     features: tuple = (16, 32, 64, 128)
-    use_meta: bool = True
+    use_meta: bool = True  # kept for old checkpoints; the architecture decides this now
     seed: int = 0
+    # Extra options for the architecture's builder, e.g. {"dino_input": 448} for unet_embed.
+    options: dict = None
 
 
 def split_sessions(paths, val_paths=None, val_fraction=0.25, seed=0):
@@ -181,8 +185,11 @@ def fit(train_dataset, val_dataset, config, out_dir, name="model", device=None, 
     torch.manual_seed(config.seed)
     source = getattr(train_dataset, "dataset", train_dataset)  # a Subset keeps the real dataset here
     n_classes = source.n_classes
-    model = UNetMulti(features=tuple(config.features), n_classes=n_classes).to(device)
-    optimiser = torch.optim.Adam(model.parameters(), lr=config.lr)
+    model = build_model(config.architecture, n_classes, config.features, **(config.options or {})).to(device)
+    if hasattr(model, "compute_prototype"):
+        used = model.compute_prototype(source, device)
+        log(f"{name}: class prototype from {used} training samples")
+    optimiser = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=config.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=config.epochs, eta_min=config.lr * 0.05)
     generator = torch.Generator().manual_seed(config.seed)
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, generator=generator,
@@ -212,6 +219,7 @@ def fit(train_dataset, val_dataset, config, out_dir, name="model", device=None, 
             best_score = score
             torch.save({
                 "state_dict": model.state_dict(), "config": asdict(config), "n_classes": n_classes,
+                "architecture": config.architecture, "sessions": sorted({Path(p).name for p in source.paths}),
                 "classes": source.classes, "epoch": epoch, "val": row,
             }, best_path)
         log(f"{name} epoch {epoch:3d}  train {row['train_loss']:.4f}  val {row['val_loss']:.4f}  "
@@ -224,6 +232,12 @@ def fit(train_dataset, val_dataset, config, out_dir, name="model", device=None, 
 def load_model(checkpoint_path, device="cpu"):
     """Load a checkpoint written by fit(). Returns (model in eval mode, checkpoint dict)."""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model = UNetMulti(features=tuple(checkpoint["config"]["features"]), n_classes=checkpoint["n_classes"])
+    config = checkpoint["config"]
+    # Checkpoints from before the registry are UNetMulti, with or without the focus input.
+    checkpoint.setdefault("architecture", "unet_multi" if config.get("use_meta", True) else "image_only")
+    options = {k: v for k, v in (config.get("options") or {}).items() if k != "pretrained"}
+    # pretrained=False: the checkpoint already holds any frozen encoder's weights, so nothing is downloaded.
+    model = build_model(checkpoint["architecture"], checkpoint["n_classes"], config["features"],
+                        pretrained=False, **options)
     model.load_state_dict(checkpoint["state_dict"])
     return model.to(device).eval(), checkpoint

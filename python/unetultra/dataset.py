@@ -24,6 +24,21 @@ def meta_vector(focus_distance_m, fx_model):
     return np.array([np.log(focus_distance_m), fx_model / 1000.0 - 1.0], dtype=np.float32)
 
 
+def meta_from_features(names, focus_distance_m, fx_model, lens_position):
+    """The meta vector for a list of named features, in order (the model-card contract).
+
+    Known names: log_focus_distance_m, fx_norm, lens_position_raw. Returns float32 [len(names)]."""
+    known = {
+        "log_focus_distance_m": lambda: np.log(focus_distance_m),
+        "fx_norm": lambda: fx_model / 1000.0 - 1.0,
+        "lens_position_raw": lambda: lens_position,
+    }
+    unknown = [name for name in names if name not in known]
+    if unknown:
+        raise ValueError(f"unknown meta feature(s) {unknown}; known: {sorted(known)}")
+    return np.array([known[name]() for name in names], dtype=np.float32)
+
+
 def preprocess_image(image, size=MODEL_SIZE):
     """Centre-square crop of a uint8 RGB frame, resized to size x size (antialiased bilinear)."""
     crop = CenterSquareCrop.for_size((image.shape[1], image.shape[0]), size)

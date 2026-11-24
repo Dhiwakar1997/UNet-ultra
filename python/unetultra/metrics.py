@@ -131,6 +131,35 @@ def evaluate_model(model, dataset, device="cpu", batch_size=8):
     return object_rows, image_rows, predictions
 
 
+def evaluate_predictor(predict, dataset, features):
+    """Score any model given as a function: predict(image_u8, meta) -> (mask_logits, depth).
+
+    Used for exported bundles run through Core ML. image_u8 is the uint8 [H, W, 3] model input,
+    meta the float32 values for `features`; the outputs are numpy arrays [1, C, H, W] and
+    [1, 1, H, W]. Returns (object_rows, image_rows, latencies_ms)."""
+    import time
+
+    from .export import class_map, item_meta
+
+    object_rows, image_rows, latencies = [], [], []
+    for index in range(len(dataset)):
+        item = dataset[index]
+        image_u8 = (item["image"].permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+        meta = item_meta(item, features)
+        started = time.perf_counter()
+        logits, depth = predict(image_u8, meta)
+        latencies.append((time.perf_counter() - started) * 1000)
+        pred_labels = torch.from_numpy(class_map(np.asarray(logits)).astype(np.int64))
+        pred_depth = torch.from_numpy(np.asarray(depth, dtype=np.float32)[0, 0])
+        rows, image_row = evaluate_sample(pred_labels, pred_depth, item, dataset.sample_meta(index))
+        for row in rows:
+            row["index"] = index
+        image_row["index"] = index
+        object_rows.extend(rows)
+        image_rows.append(image_row)
+    return object_rows, image_rows, latencies
+
+
 def _column(rows, key):
     return np.array([row[key] for row in rows], dtype=float)
 

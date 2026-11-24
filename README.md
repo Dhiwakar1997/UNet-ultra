@@ -118,10 +118,27 @@ jupyter lab notebooks
 
 | Notebook | What it does | Output |
 | --- | --- | --- |
-| `01_masks` | Step through SAM 2.1's masks one by one: accept, reject, or edit (extra clicks, restart from a new point, or draw the outline by hand) | `labels.png`, `instances.png`, `mask_status` written into each zip |
-| `02_train` | Lens calibration; trains the model and the image-only ablation | `models/calibration.json`, `models/model.pt`, `models/model_image_only.pt` |
-| `03_evaluate` | Scores both models and the focus-only baseline on the test zip | metrics, plots, a generated verdict |
-| `04_export_coreml` | Converts to Core ML, compares with PyTorch, copies files for the app | `models/UNetUltra.mlpackage` |
+| `01_masks` | Step through SAM 2.1's masks one by one: accept, reject, or edit | `labels.png`, `instances.png`, `mask_status` written into each zip |
+| `02_train` | Lens calibration; trains three models: U-Net + focus, image only, U-Net + DINOv2 | `models/calibration.json`, `models/model.pt`, `models/model_image_only.pt`, `models/model_embed.pt` |
+| `03_evaluate` | Scores all three and the focus-only baseline on the test zip | metrics, plots, a generated verdict |
+| `04_export_coreml` | Exports each model as a bundle for the phone | `exports/<name>.unetmodel`, `exports/calibration.json` |
+| `05_compare_models` | Runs the exported bundles through Core ML on the Mac, side by side | one table with accuracy, latency and size |
+
+### Models
+
+Three architectures are registered in `python/unetultra/models/`, all with the same inputs and
+outputs (see `docs/model_contract.md`):
+
+- **`unet_multi`**: the U-Net with the focus input.
+- **`image_only`**: the same U-Net without the focus input, to measure what focus adds.
+- **`unet_embed`**: the U-Net with the focus input plus a frozen DINOv2-small encoder. The image
+  is resized to 448×448 for DINOv2, whose 32×32 patch grid matches the U-Net bottleneck; the
+  patch features and a similarity map against a class prototype are fused there. It is about
+  50 MB at fp16 against 4 MB for the plain U-Net, and slower.
+
+Each trained model is exported as a `.unetmodel` bundle (Core ML model, model card, self-test).
+The app keeps a model library: import bundles, see their cards and self-test results, and
+switch between them on the Inference tab without rebuilding the app.
 
 The notebooks are generated from `tools/build_notebooks.py`; edit that file and re-run it rather
 than editing the `.ipynb` JSON by hand if you want clean diffs.

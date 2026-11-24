@@ -157,14 +157,23 @@ write("02_train", [
 # 02 · Calibration and training
 
 1. Fit the per-device **lens-position → distance** calibration on the training captures.
-2. Train `UNetMulti` (mask + depth) with the calibrated focus distance as a side input.
-3. Train the **image-only** ablation (meta input zeroed) for comparison in `03_evaluate`.
+2. Train every model listed in `RUNS`. The default is three:
+   - `unet_multi`: the U-Net with the focus input,
+   - `image_only`: the same U-Net with no focus input (the ablation),
+   - `unet_embed`: the U-Net with the focus input and frozen **DINOv2-small** features.
 
-Only sessions whose manifest says `split: train` are used, and validation is a whole held-out
-session. The test zip is never opened here. The model never receives depth as an input.
+Only sessions whose manifest says `split: train` are used. The test zip is never opened here.
+No model ever receives depth as an input. The first `unet_embed` run downloads the DINOv2
+weights (about 90 MB).
 """),
     code(SETUP),
     code("""
+# checkpoint name -> architecture (any name registered in unetultra.models.ARCHITECTURES)
+RUNS = {
+    "model": "unet_multi",
+    "model_image_only": "image_only",
+    "model_embed": "unet_embed",
+}
 EPOCHS = 60
 BATCH_SIZE = 8
 DEPTH_WEIGHT = 0.5          # weight of the depth loss against the mask loss
@@ -203,50 +212,54 @@ calibration.save(MODELS / "calibration.json")
 print(f"{calibration.n_samples} samples, RMSE {calibration.rmse_m * 100:.2f} cm, device {calibration.device_model}")
 plots.calibration_fit(calibration, points);
 """),
-    md("## Datasets\n\nAccepted samples only. Pre-processing takes the centre square of each frame and resizes it to\n512×512, with the intrinsics transformed to match. Samples whose object was tapped outside that\nsquare cannot be used and are listed as `excluded_outside_crop`."),
-    code("""
-from unetultra.dataset import SessionDataset
+    md("""
+## Datasets
 
+Accepted samples only. Pre-processing takes the centre square of each frame and resizes it to
+512×512, with the intrinsics transformed to match. Samples whose object was tapped outside that
+square cannot be used and are listed as `excluded_outside_crop`.
+"""),
+    code("""
 from torch.utils.data import Subset
+from unetultra.dataset import SessionDataset
+from unetultra.models import uses_meta
 from unetultra.train import split_single_session
 
-full_train = SessionDataset(train_paths, calibration, augment=True)
-full_val = SessionDataset(val_paths, calibration)
-if SINGLE_SESSION:
-    train_indices, val_indices = split_single_session(full_train)
-    train_set, val_set = Subset(full_train, train_indices), Subset(full_val, val_indices)
-else:
-    train_set, val_set = full_train, full_val
+
+def datasets(architecture):
+    \"\"\"Train and validation sets for one architecture (an image-only model gets a zeroed meta input).\"\"\"
+    use_meta = uses_meta(architecture)
+    train = SessionDataset(train_paths, calibration, augment=True, use_meta=use_meta)
+    val = SessionDataset(val_paths, calibration, use_meta=use_meta)
+    if SINGLE_SESSION:
+        train_indices, val_indices = split_single_session(train)
+        return Subset(train, train_indices), Subset(val, val_indices), train
+    return train, val, train
+
+
+train_set, val_set, full_train = datasets("unet_multi")
 background = sum(int(train_set[i]["instances"].max()) == 0 for i in range(len(train_set)))
 print(f"train {len(train_set)} samples ({full_train.skipped} skipped as not accepted), validation {len(val_set)}")
-for path, sample_id, reason in full_train.excluded + ([] if SINGLE_SESSION else full_val.excluded):
+for path, sample_id, reason in full_train.excluded:
     print(f"  {reason}: {Path(path).name} sample {sample_id}")
 print(f"background-only share of training samples: {background / max(len(train_set), 1):.0%} (aim for about 10%)")
 print("classes:", full_train.classes)
 """),
-    md("## Train the model"),
+    md("## Train\n\nOne line per epoch; `*` marks a new best checkpoint (lowest validation object-distance error)."),
     code("""
 from unetultra.train import TrainConfig, fit
 
-config = TrainConfig(epochs=EPOCHS, batch_size=BATCH_SIZE, depth_weight=DEPTH_WEIGHT,
-                     object_depth_weight=OBJECT_DEPTH_WEIGHT)
-history, checkpoint = fit(train_set, val_set, config, MODELS, name="model")
-print("best checkpoint:", checkpoint)
-"""),
-    md("## Train the image-only ablation\n\nSame data and settings, with the meta input zeroed."),
-    code("""
-from dataclasses import replace
-
-ablation_config = replace(config, use_meta=False)
-ablation_train = SessionDataset(train_paths, calibration, augment=True, use_meta=False)
-ablation_val = SessionDataset(val_paths, calibration, use_meta=False)
-if SINGLE_SESSION:
-    ablation_train, ablation_val = Subset(ablation_train, train_indices), Subset(ablation_val, val_indices)
-ablation_history, ablation_checkpoint = fit(ablation_train, ablation_val, ablation_config, MODELS, name="model_image_only")
+histories = {}
+for name, architecture in RUNS.items():
+    config = TrainConfig(architecture=architecture, epochs=EPOCHS, batch_size=BATCH_SIZE,
+                         depth_weight=DEPTH_WEIGHT, object_depth_weight=OBJECT_DEPTH_WEIGHT)
+    run_train, run_val, _ = datasets(architecture)
+    histories[name], checkpoint = fit(run_train, run_val, config, MODELS, name=name)
+    print("best checkpoint:", checkpoint, "\\n")
 """),
     md("## Learning curves"),
     code("""
-plots.learning_curves({"with focus": history, "image only": ablation_history});
+plots.learning_curves(histories);
 """),
 ])
 
@@ -254,51 +267,68 @@ write("03_evaluate", [
     md("""
 # 03 · Evaluation
 
-Scores the trained model on a **separate test zip** (different room or day). The model receives
-the image and the meta vector only; LiDAR depth is used solely as the truth to score against.
+Scores every trained model on a **separate test zip** (different room or day). The models
+receive the image and the meta vector only; LiDAR depth is used solely as the truth to score
+against.
 
 Compared here:
-- the model with the focus input,
-- the image-only ablation,
+- every checkpoint in `RUNS` (by default the U-Net with focus, the image-only ablation and the
+  DINOv2 model),
 - a no-learning baseline that takes the calibrated focus distance as the object's distance.
 """),
     code(SETUP),
     code("""
+# checkpoint name -> label in the tables; the first one is the reference model
+RUNS = {"model": "U-Net + focus", "model_image_only": "image only", "model_embed": "U-Net + DINOv2"}
+""", tag="parameters"),
+    code("""
 from unetultra.calibration import LensCalibration
 from unetultra.dataset import SessionDataset
+from unetultra.models import uses_meta
 from unetultra.session import find_sessions
 from unetultra.train import load_model
 
 TEST_ZIPS = find_sessions(DATA, "test")        # only sessions marked split: test
 assert TEST_ZIPS, "no test session found in ../data"
 calibration = LensCalibration.load(MODELS / "calibration.json")
-model, checkpoint = load_model(MODELS / "model.pt")
-ablation, _ = load_model(MODELS / "model_image_only.pt")
-test_set = SessionDataset(TEST_ZIPS, calibration)
-test_set_image_only = SessionDataset(TEST_ZIPS, calibration, use_meta=False)
-print(f"{len(test_set)} test samples from {len(TEST_ZIPS)} session(s); checkpoint from epoch {checkpoint['epoch']}")
+RUNS = {name: label for name, label in RUNS.items() if (MODELS / f"{name}.pt").exists()}
+models, test_sets = {}, {}
+for name, label in RUNS.items():
+    models[label], checkpoint = load_model(MODELS / f"{name}.pt")
+    test_sets[label] = SessionDataset(TEST_ZIPS, calibration, use_meta=uses_meta(checkpoint["architecture"]))
+    print(f"{label}: {checkpoint['architecture']}, checkpoint from epoch {checkpoint['epoch']}")
+reference = next(iter(RUNS.values()))
+test_set = test_sets[reference]
+print(f"{len(test_set)} test samples from {len(TEST_ZIPS)} session(s)")
 """),
     md("## Metrics"),
     code("""
+import json
 from unetultra import metrics
+from unetultra.export import headline_metrics
 
-rows, image_rows, predictions = metrics.evaluate_model(model, test_set)
-rows_ablation, image_rows_ablation, _ = metrics.evaluate_model(ablation, test_set_image_only)
-summary = metrics.summarise(rows, image_rows)
-summary_ablation = metrics.summarise(rows_ablation, image_rows_ablation)
-print(metrics.format_summary({"with focus": summary, "image only": summary_ablation}))
+results, summaries, predictions = {}, {}, {}
+for (name, label) in RUNS.items():
+    rows, image_rows, predictions[label] = metrics.evaluate_model(models[label], test_sets[label])
+    results[label], summaries[label] = rows, metrics.summarise(rows, image_rows)
+    # Kept next to the checkpoint so the export can copy them into the model card.
+    (MODELS / f"{name}_test_metrics.json").write_text(json.dumps(headline_metrics(summaries[label])))
+rows, summary = results[reference], summaries[reference]
+print(metrics.format_summary(summaries))
 """),
     md("""
 ### Focus-only baseline
 
 Using the calibrated focus distance as the distance of the object the lens focused on, with no
-model at all. If the model cannot beat this, it has learned nothing about distance beyond focus.
+model at all. If a model cannot beat this, it has learned nothing about distance beyond focus.
 """),
     code("""
-baseline, on_targets = summary["distance_focus_baseline"], summary["distance_model_on_focus_targets"]
+baseline = summary["distance_focus_baseline"]
 print(f"focused objects: {baseline['n']}")
-print(f"  focus distance alone : {baseline['mae']:.2f} cm mean abs error ({baseline['mape']:.1f}%)")
-print(f"  model with focus     : {on_targets['mae']:.2f} cm mean abs error ({on_targets['mape']:.1f}%)")
+print(f"  {'focus distance alone':22}: {baseline['mae']:.2f} cm mean abs error ({baseline['mape']:.1f}%)")
+for label, s in summaries.items():
+    on_targets = s["distance_model_on_focus_targets"]
+    print(f"  {label:22}: {on_targets['mae']:.2f} cm mean abs error ({on_targets['mape']:.1f}%)")
 """),
     md("""
 ### Size: before and after the bias fix
@@ -316,8 +346,8 @@ if lidar_vs_ruler["n"]:
 """),
     md("### By distance"),
     code("""
-for name, r in (("with focus", rows), ("image only", rows_ablation)):
-    print(name)
+for label, r in results.items():
+    print(label)
     for row in metrics.distance_error_by_bin(r):
         print(f"  {row['bin_cm'][0]:>3}-{row['bin_cm'][1]:<3} cm  n={row['n']:<3} "
               f"mean abs {row['mae']:.2f} cm ({row['mape']:.1f}%)  bias {row['bias']:+.2f} cm")
@@ -326,92 +356,165 @@ for name, r in (("with focus", rows), ("image only", rows_ablation)):
     code("""
 from unetultra import plots
 
-results = {"with focus": rows, "image only": rows_ablation}
 plots.predicted_vs_true_distance(results)
 plots.error_vs_distance(results)
-plots.error_vs_distance({"with focus": rows}, key="pred_width_cm", truth="true_width_cm", ylabel="width error (cm)")
+plots.error_vs_distance(results, key="pred_width_cm", truth="true_width_cm", ylabel="width error (cm)")
 plots.error_vs_lens(rows);
 """),
     code("""
-plots.example_overlays(test_set, predictions, rows);
+plots.example_overlays(test_set, predictions[reference], rows);
 """),
     md("## Verdict\n\nGenerated from the numbers above. Add your own reading underneath after looking at the plots."),
     code("""
-print(metrics.verdict(summary, summary_ablation, rows))
+if "image only" in summaries and reference != "image only":
+    print(metrics.verdict(summary, summaries["image only"], rows))
+for label, s in summaries.items():
+    if label not in (reference, "image only") and s.get("distance", {}).get("n"):
+        print(f"{label} against {reference}: distance error {s['distance']['mae']:.2f} cm vs {summary['distance']['mae']:.2f} cm, "
+              f"Dice {s['dice']:.3f} vs {summary['dice']:.3f}.")
 """),
     md("_Your notes:_"),
 ])
 
 write("04_export_coreml", [
     md("""
-# 04 · Core ML export
+# 04 · Export model bundles for the phone
 
-Converts the trained model to `UNetUltra.mlpackage` (iOS 17+) and puts it next to
-`calibration.json`, ready for the app's Inference tab.
+Turns each trained checkpoint into a **model bundle** (`exports/<name>.unetmodel`): the Core ML
+model, a model card and a self-test, following `docs/model_contract.md`. The app imports
+bundles into its model library, and you switch between them on the Inference tab.
 
-- input `image`: 512×512 RGB (the centre square of the frame, cropped and resized by the app);
-  the 1/255 scaling used in training is built in
-- input `meta`: `[1, 2]` float32 = `[log(calibrated focus distance in m), fx of the 512×512 crop / 1000 − 1]`
-- outputs `mask_logits` and `depth` (metres)
+This notebook is a thin wrapper around the command-line tool:
 
-Run this on the Mac: comparing Core ML with PyTorch needs macOS.
+    python -m unetultra.export --checkpoint models/model.pt --name unet-multi-512 --out exports/
+
+Run it on the Mac: checking Core ML against PyTorch needs macOS. Run `03_evaluate` first so the
+test metrics are copied into each model card.
 """),
     code(SETUP),
     code("""
-from unetultra.export import export_coreml
-from unetultra.train import load_model
-
-model, checkpoint = load_model(MODELS / "model.pt")
-package = MODELS / "UNetUltra.mlpackage"
-mlmodel = export_coreml(model, checkpoint["classes"], package)
-print("wrote", package, "· classes", checkpoint["classes"])
-"""),
-    md("## Core ML against PyTorch on real samples"),
+# checkpoint name -> (bundle name, name shown in the app)
+BUNDLES = {
+    "model": ("unet-multi-512", "U-Net + focus"),
+    "model_image_only": ("unet-image-only-512", "U-Net, image only"),
+    "model_embed": ("unet-embed-dinov2s-512", "U-Net + DINOv2-S"),
+}
+PRECISION = "fp16"   # "fp32" is about twice the size and matches PyTorch more closely
+EXPORTS = Path("../exports")
+""", tag="parameters"),
     code("""
-import platform
+import json, shutil
 from unetultra.calibration import LensCalibration
 from unetultra.dataset import SessionDataset
-from unetultra.export import compare_with_pytorch
+from unetultra.export import export_bundle
+from unetultra.models import uses_meta
 from unetultra.session import find_sessions
+from unetultra.train import load_model
 
-DEPTH_TOLERANCE_M = 1e-3
-LOGIT_TOLERANCE = 1e-2
-
-if platform.system() != "Darwin":
-    print("Core ML models only run on macOS: skipping the comparison on", platform.system())
-else:
-    calibration = LensCalibration.load(MODELS / "calibration.json")
-    samples = SessionDataset(find_sessions(DATA), calibration)
-    indices = list(range(0, len(samples), max(1, len(samples) // 8)))[:8]
-    comparison = compare_with_pytorch(mlmodel, model, samples, indices)
-    for row in comparison:
-        print(f"{row['sample_id']}: mask logits {row['mask_logits_max_abs_diff']:.2e}, "
-              f"depth {row['depth_max_abs_diff_m'] * 1000:.3f} mm, mask pixels changed {row['mask_pixels_changed']}")
-    worst_depth = max(row["depth_max_abs_diff_m"] for row in comparison)
-    worst_logit = max(row["mask_logits_max_abs_diff"] for row in comparison)
-    print(f"\\nmaximum absolute difference: depth {worst_depth * 1000:.3f} mm, mask logits {worst_logit:.2e}")
-    assert worst_depth < DEPTH_TOLERANCE_M and worst_logit < LOGIT_TOLERANCE, "Core ML and PyTorch disagree"
-    print("PASS")
+calibration = LensCalibration.load(MODELS / "calibration.json")
+zips = find_sessions(DATA, "test") or find_sessions(DATA)
+cards = {}
+for checkpoint_name, (bundle_name, display_name) in BUNDLES.items():
+    checkpoint_path = MODELS / f"{checkpoint_name}.pt"
+    if not checkpoint_path.exists():
+        print("skipping", checkpoint_name, "(not trained)")
+        continue
+    architecture = load_model(checkpoint_path)[1]["architecture"]
+    samples = SessionDataset(zips, calibration, use_meta=uses_meta(architecture))
+    metrics_file = MODELS / f"{checkpoint_name}_test_metrics.json"
+    test_metrics = json.loads(metrics_file.read_text()) if metrics_file.exists() else None
+    bundle, cards[bundle_name], comparison = export_bundle(
+        checkpoint_path, bundle_name, EXPORTS, samples, PRECISION, display_name, test_metrics)
+    if comparison:
+        worst = max(row["depth_max_abs_diff_m"] for row in comparison)
+        changed = max(row["mask_pixels_changed"] for row in comparison)
+        tolerance = 0.01 if PRECISION == "fp16" else 0.001
+        print("  PASS" if worst < tolerance else "  CHECK", f"worst depth difference {worst * 1000:.2f} mm, "
+              f"at most {changed} mask pixels changed\\n")
+shutil.copy(MODELS / "calibration.json", EXPORTS / "calibration.json")
+"""),
+    md("## What was exported"),
+    code("""
+for name, card in cards.items():
+    print(f"{card['display_name']:22} {card['architecture']:12} {card['size_mb']:6.1f} MB  {card['precision']}  "
+          f"meta {card['meta_features']}  test {card['test_metrics']}")
+print("\\nFiles in", EXPORTS.resolve())
+for path in sorted(EXPORTS.iterdir()):
+    print("  ", path.name)
 """),
     md("""
-## Hand over to the app
+## Send to the phone
 
-Both files must exist. Copy them into `ios/UNetUltra/UNetUltra/Resources/` (Xcode picks them up
-automatically and compiles the model), or AirDrop them to the phone and import them from the
-Inference tab. Neither file is committed to git.
+AirDrop the `.unetmodel` files and `calibration.json` from `exports/` to the iPhone (or put them
+in iCloud Drive). Open each `.unetmodel` with UNet-ultra, or import it from the app's Models
+screen; import `calibration.json` once from the Inference tab. Each import runs the bundle's
+self-test on the phone and shows pass or fail. Nothing in `exports/` is committed to git.
 """),
-    code("""
-import shutil
+])
 
-calibration_file = MODELS / "calibration.json"
-assert package.exists() and calibration_file.exists()
-resources = Path("../ios/UNetUltra/UNetUltra/Resources")
-resources.mkdir(exist_ok=True)
-# Bundled under another name: Xcode generates a class named after the file, and "UNetUltra"
-# is already the app module's name.
-shutil.copytree(package, resources / "UNetUltraModel.mlpackage", dirs_exist_ok=True)
-shutil.copy(calibration_file, resources / calibration_file.name)
-print("copied to", resources.resolve())
+write("05_compare_models", [
+    md("""
+# 05 · Compare exported models
+
+Runs every bundle in `exports/` **through Core ML on the Mac** (the same converted models the
+phone runs, not PyTorch) on the same test zip, and puts them side by side: mask quality,
+distance and size error, false positives on background-only samples, latency and file size.
+
+Needs macOS. Laptop and phone numbers can still differ a little (different chips, resizing);
+the self-test on the phone measures that gap.
+"""),
+    code(SETUP),
+    code("""
+EXPORTS = Path("../exports")
+""", tag="parameters"),
+    code("""
+import platform, tempfile
+import numpy as np
+from unetultra import metrics
+from unetultra.calibration import LensCalibration
+from unetultra.dataset import SessionDataset
+from unetultra.export import coreml_predict, extract_package, read_card
+from unetultra.session import find_sessions
+
+assert platform.system() == "Darwin", "Core ML models only run on macOS"
+import coremltools as ct
+
+TEST_ZIPS = find_sessions(DATA, "test")
+assert TEST_ZIPS, "no test session found in ../data"
+calibration = LensCalibration.load(MODELS / "calibration.json")
+test_set = SessionDataset(TEST_ZIPS, calibration)
+
+results, summaries, extra = {}, {}, {}
+for bundle in sorted(EXPORTS.glob("*.unetmodel")):
+    card = read_card(bundle)
+    with tempfile.TemporaryDirectory() as tmp:
+        mlmodel = ct.models.MLModel(str(extract_package(bundle, tmp)))
+        coreml_predict(mlmodel, np.zeros((card["input"]["height"], card["input"]["width"], 3), np.uint8),
+                       np.zeros(len(card["meta_features"]), np.float32))   # warm-up, not timed
+        rows, image_rows, latencies = metrics.evaluate_predictor(
+            lambda image, meta: coreml_predict(mlmodel, image, meta), test_set, card["meta_features"])
+    label = card["display_name"]
+    results[label], summaries[label] = rows, metrics.summarise(rows, image_rows)
+    extra[label] = {"latency_ms": float(np.median(latencies)), "size_mb": card["size_mb"],
+                    "architecture": card["architecture"], "precision": card["precision"]}
+    print("evaluated", label)
+"""),
+    md("## Table"),
+    code("""
+print(metrics.format_summary(summaries))
+print()
+print(f"{'':38}" + "".join(f"{label:>18}" for label in extra))
+print(f"{'Mac latency (median)':38}" + "".join(f"{e['latency_ms']:15.1f} ms" for e in extra.values()))
+print(f"{'model size':38}" + "".join(f"{e['size_mb']:15.1f} MB" for e in extra.values()))
+print(f"{'precision':38}" + "".join(f"{e['precision']:>18}" for e in extra.values()))
+"""),
+    md("## Error against distance"),
+    code("""
+from unetultra import plots
+
+plots.predicted_vs_true_distance(results)
+plots.error_vs_distance(results)
+plots.error_vs_distance(results, key="pred_width_cm", truth="true_width_cm", ylabel="width error (cm)");
 """),
 ])
 print("notebooks written")
