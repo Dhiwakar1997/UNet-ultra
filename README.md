@@ -213,14 +213,20 @@ surfaces, backgrounds and lighting.
 
 ### Inference tab
 
-1. Run `04_export_coreml`. It copies `UNetUltra.mlpackage` and `calibration.json` into
-   `ios/UNetUltra/UNetUltra/Resources/`; rebuild and run the app. (Both can also be imported
-   from Files inside the tab.)
-2. Point at the case, keep it inside the square guide, and tap it. When focus settles the model
-   runs on that frame.
-3. The screen shows the mask overlay, the predicted distance and width × height, and beside them
-   the LiDAR distance over the same pixels, labelled as a reference the model does not use.
-4. **Log result** appends the prediction, the LiDAR reference and any measured values to a CSV
+1. Export the models with `04_export_coreml` and AirDrop the `.unetmodel` files and
+   `calibration.json` from `exports/` to the phone. Open each `.unetmodel` with UNet-ultra (or
+   import it on the **Models** tab); each import runs a self-test and shows pass or fail. Import
+   `calibration.json` with the target icon at the top left of the Inference tab.
+2. **Live** (on by default): point at the case inside the square guide. The model runs
+   continuously, the mask follows the case, and the autofocus is kept aimed at the mask so the
+   focus input tracks the object. The distance is steady once the lens stops moving. With
+   several objects in view, tap the one to follow.
+3. Turn **Live** off for one run per tap: tap the case, the lens focuses, and the model runs
+   once on that frame.
+4. The screen shows the mask overlay, the predicted distance and width × height, and beside them
+   the LiDAR distance over the same pixels, labelled as a reference the model does not use,
+   plus latency. The menu under the preview switches model and compute units.
+5. **Log result** appends the prediction, the LiDAR reference and any measured values to a CSV
    you can export.
 
 ## Data format

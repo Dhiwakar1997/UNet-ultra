@@ -111,6 +111,12 @@ final class CaptureService: ObservableObject {
         return result
     }
 
+    /// Keep the lens continuously focused (and exposure metered) at a point in normalized
+    /// capture-device coordinates. Returns at once; used by live inference to follow the object.
+    func trackFocus(atDevicePoint point: CGPoint) {
+        pipeline.trackFocus(at: point)
+    }
+
     /// LiDAR distance in metres at a point in image pixels of `frame` (median of a small window).
     nonisolated static func lidarDistance(in frame: CapturedFrame, atImagePoint point: CGPoint) -> Double? {
         frame.lidarDistance(atImagePoint: point)
@@ -375,6 +381,26 @@ final class CapturePipeline: NSObject, AVCaptureDataOutputSynchronizerDelegate, 
             }
         }
         return FocusResult(lensPosition: Double(device.lensPosition), settled: false)
+    }
+
+    /// Continuous autofocus and exposure at the point; does not wait for the lens.
+    func trackFocus(at point: CGPoint) {
+        sessionQueue.async {
+            guard let device = self.device, (try? device.lockForConfiguration()) != nil else { return }
+            if device.isFocusPointOfInterestSupported {
+                device.focusPointOfInterest = point
+            }
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = point
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.unlockForConfiguration()
+        }
     }
 
     /// Start a one-shot autofocus (and exposure metering) at the point. Returns nil if focus

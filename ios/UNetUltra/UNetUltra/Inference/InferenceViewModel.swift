@@ -14,6 +14,14 @@ final class InferenceViewModel: ObservableObject {
     @Published private(set) var resultLogged = false
     @Published var statusMessage: String?
     @Published var measured = MeasuredValues()
+    /// Live mode: the model runs continuously and the lens follows the object it finds.
+    @Published private(set) var isLive = false
+    /// Model runs per second in live mode.
+    @Published private(set) var liveRate: Double = 0
+
+    private var liveTask: Task<Void, Never>?
+    /// Where the followed object is, in normalized capture-device coordinates.
+    private var liveSelection: CGPoint?
 
     let log: ResultLog
 
@@ -91,6 +99,103 @@ final class InferenceViewModel: ObservableObject {
             overlay = nil
             statusMessage = error.localizedDescription
         }
+    }
+
+    // MARK: Live mode
+
+    /// Run the model continuously on the newest frame. Each result's mask centre becomes the
+    /// autofocus point, so the lens (and with it the focus input) follows the object without a tap.
+    func startLive(service: CaptureService, store: ModelStore, assets: ModelAssets) {
+        guard liveTask == nil else { return }
+        isLive = true
+        liveSelection = nil
+        liveTask = Task { [weak self] in
+            var lastFramePresentation = -1.0
+            var lastFocusPoint: CGPoint?
+            var misses = 0
+            var lastRun = Date()
+            while !Task.isCancelled {
+                guard let self else { return }
+                guard service.isRunning, !store.isLoadingModel, let segmentation = store.activeModel,
+                      let frame = await service.currentFrame(), frame.presentationTime != lastFramePresentation
+                else {
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                    continue
+                }
+                lastFramePresentation = frame.presentationTime
+                let entry = store.activeEntry
+                let units = store.computeUnits
+                let calibration = assets.calibration
+                let selection = self.liveSelection.map { CaptureViewModel.imagePoint($0, in: frame) }
+                do {
+                    let measured = try await Task.detached(priority: .userInitiated) {
+                        try InferenceRunner.run(model: segmentation, calibration: calibration, frame: frame,
+                                                tapImagePoint: selection)
+                    }.value
+                    if Task.isCancelled { break }
+                    var outcome = measured
+                    outcome.modelVersion = entry?.version ?? ""
+                    outcome.architecture = entry?.architecture ?? ""
+                    outcome.computeUnits = units.rawValue
+                    if store.activeID == entry?.id, store.computeUnits == units {
+                        store.recordLatency(outcome.latencyMs)
+                    }
+                    self.result = outcome
+                    self.resultLogged = false
+                    self.overlay = outcome.found
+                        ? MaskImage.make(pixels: outcome.pixels, width: outcome.maskWidth, height: outcome.maskHeight)
+                        : nil
+                    if outcome.found, let centroid = outcome.centroid {
+                        misses = 0
+                        let point = CGPoint(x: centroid.x, y: centroid.y)
+                        self.liveSelection = point
+                        // Re-aim the autofocus only when the object has moved noticeably.
+                        let moved = lastFocusPoint.map { hypot($0.x - point.x, $0.y - point.y) > 0.04 } ?? true
+                        if moved {
+                            service.trackFocus(atDevicePoint: point)
+                            lastFocusPoint = point
+                        }
+                        self.statusMessage = frame.isAdjustingFocus ? "Focusing… the distance settles when the lens stops." : nil
+                    } else {
+                        misses += 1
+                        if misses >= 5 {
+                            self.liveSelection = nil
+                            lastFocusPoint = nil
+                        }
+                        self.statusMessage = "Looking for the object…"
+                    }
+                } catch {
+                    self.statusMessage = error.localizedDescription
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+                let now = Date()
+                let interval = now.timeIntervalSince(lastRun)
+                lastRun = now
+                if interval > 0 { self.liveRate = 0.8 * self.liveRate + 0.2 / interval }
+                await Task.yield()
+            }
+        }
+    }
+
+    func stopLive() {
+        liveTask?.cancel()
+        liveTask = nil
+        isLive = false
+        liveRate = 0
+    }
+
+    /// A tap while live: follow the object at that point (useful when there are several).
+    func liveTap(devicePoint: CGPoint, service: CaptureService) {
+        guard (0...1).contains(devicePoint.x), (0...1).contains(devicePoint.y) else { return }
+        if let configuration = service.configuration,
+           !CenterSquareCrop.containsDevicePoint(x: Double(devicePoint.x), y: Double(devicePoint.y),
+                                                 imageWidth: configuration.videoWidth,
+                                                 imageHeight: configuration.videoHeight) {
+            statusMessage = CenterSquareCrop.outsideHint
+            return
+        }
+        liveSelection = devicePoint
+        service.trackFocus(atDevicePoint: devicePoint)
     }
 
     func clearResult() {

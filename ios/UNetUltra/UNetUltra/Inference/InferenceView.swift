@@ -14,6 +14,8 @@ struct InferenceView: View {
     @State private var showImporter = false
     @State private var showMeasurements = false
     @State private var exportItem: ExportItem?
+    /// On: the model runs continuously and follows the object. Off: one run per tap.
+    @AppStorage("inference.live") private var liveEnabled = true
 
     var body: some View {
         NavigationStack {
@@ -42,11 +44,20 @@ struct InferenceView: View {
             }
             .failedSelfTestConfirmation(store: store)
             .onChange(of: store.activeID) { _, _ in model.clearResult() }
+            .onChange(of: liveEnabled) { _, enabled in
+                if enabled {
+                    model.startLive(service: captureService, store: store, assets: assets)
+                } else {
+                    model.stopLive()
+                }
+            }
             .task {
                 await assets.loadIfNeeded()
                 await store.loadIfNeeded()
                 await captureService.start()
+                if liveEnabled { model.startLive(service: captureService, store: store, assets: assets) }
             }
+            .onDisappear { model.stopLive() }
         }
     }
 
@@ -64,8 +75,13 @@ struct InferenceView: View {
     private var cameraArea: some View {
         ZStack {
             CameraPreviewView(session: captureService.captureSession, proxy: previewProxy) { devicePoint in
-                Task {
-                    await model.handleTap(devicePoint: devicePoint, service: captureService, store: store, assets: assets)
+                if model.isLive {
+                    model.liveTap(devicePoint: devicePoint, service: captureService)
+                } else {
+                    Task {
+                        await model.handleTap(devicePoint: devicePoint, service: captureService, store: store,
+                                              assets: assets)
+                    }
                 }
             }
             if let configuration = captureService.configuration {
@@ -216,17 +232,20 @@ struct InferenceView: View {
                             .font(.body.monospacedDigit())
                     }
                 }
-                Text(String(format: "latency %.0f ms · mask %d px · lens %.3f · focus %@",
-                            result.latencyMs, result.areaPx, result.lensPosition, Self.cm(result.focusDistanceM)))
+                Text(String(format: "latency %.0f ms%@ · mask %d px · lens %.3f · focus %@",
+                            result.latencyMs, model.isLive ? String(format: " · %.1f runs/s", model.liveRate) : "",
+                            result.areaPx, result.lensPosition, Self.cm(result.focusDistanceM)))
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             } else {
-                Text("Tap the object inside the square.")
+                Text(model.isLive ? "Live: point at the object inside the square."
+                                  : "Tap the object inside the square.")
                     .font(.callout).foregroundStyle(.secondary)
                 Text(String(format: "lens %.3f · focus %@", captureService.lensPosition, Self.cm(focusDistance)))
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // A fixed height, so the preview does not resize every time a result appears or goes.
+        .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
         .padding(.horizontal)
     }
 
@@ -242,8 +261,12 @@ struct InferenceView: View {
 
     private var controls: some View {
         HStack(spacing: 12) {
-            Button("Clear") { model.clearResult() }
-                .disabled(model.result == nil)
+            Toggle("Live", isOn: $liveEnabled)
+                .toggleStyle(.button)
+            if !model.isLive {
+                Button("Clear") { model.clearResult() }
+                    .disabled(model.result == nil)
+            }
             Button {
                 model.logResult()
             } label: {

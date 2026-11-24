@@ -13,8 +13,11 @@ struct SquareGuideView: View {
     var body: some View {
         // The preview layer's geometry settles a moment after the view appears; a slow
         // timeline makes sure the guide is drawn once it has.
-        TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+        TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
             Canvas { context, size in
+                // Reading the date makes each tick a real redraw; without it the square can be
+                // left where the preview used to be after the layout changes.
+                _ = timeline.date
                 guard let corners = Self.corners(proxy: proxy, imageWidth: imageWidth, imageHeight: imageHeight)
                 else { return }
                 var square = Path()
