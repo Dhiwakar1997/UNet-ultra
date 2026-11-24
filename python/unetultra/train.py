@@ -34,7 +34,8 @@ def split_sessions(paths, val_paths=None, val_fraction=0.25, seed=0):
     """Split session zips into train and validation by whole session, never by frame.
 
     Pass val_paths to choose the validation sessions yourself; otherwise sessions are shuffled
-    and about val_fraction of them (at least one) are held out. Test sessions are refused."""
+    and about val_fraction of them (at least one) are held out. Test sessions are refused.
+    With a single training session this raises; use split_single_session instead."""
     paths = [str(p) for p in paths]
     for path in paths + [str(p) for p in (val_paths or [])]:
         with Session(path) as sess:
@@ -52,6 +53,21 @@ def split_sessions(paths, val_paths=None, val_fraction=0.25, seed=0):
     random.Random(seed).shuffle(order)
     n_val = max(1, round(len(order) * val_fraction))
     return sorted(order[n_val:]), sorted(order[:n_val])
+
+
+def split_single_session(dataset, val_fraction=0.2):
+    """Fallback for one training session: hold out its last block of samples for validation.
+
+    Returns (train_indices, val_indices) into `dataset`. The held-out samples are the last
+    ones captured, as one contiguous block, never a random pick: neighbouring frames are
+    near-duplicates, so a random split would leak. Even so, the validation numbers come from
+    the same room and day as training and will look better than the truth; only the separate
+    test session gives an honest score."""
+    n = len(dataset)
+    if n < 8:
+        raise ValueError(f"only {n} usable samples; need at least 8 to hold some out for validation")
+    n_val = max(2, round(n * val_fraction))
+    return list(range(n - n_val)), list(range(n - n_val, n))
 
 
 def soft_dice_loss(probability, target, weight):
@@ -143,7 +159,8 @@ def fit(train_dataset, val_dataset, config, out_dir, name="model", device=None, 
     written next to the checkpoint as <name>_history.json."""
     device = device or pick_device()
     torch.manual_seed(config.seed)
-    n_classes = train_dataset.n_classes
+    source = getattr(train_dataset, "dataset", train_dataset)  # a Subset keeps the real dataset here
+    n_classes = source.n_classes
     model = UNetMulti(features=tuple(config.features), n_classes=n_classes).to(device)
     optimiser = torch.optim.Adam(model.parameters(), lr=config.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=config.epochs, eta_min=config.lr * 0.05)
@@ -175,7 +192,7 @@ def fit(train_dataset, val_dataset, config, out_dir, name="model", device=None, 
             best_score = score
             torch.save({
                 "state_dict": model.state_dict(), "config": asdict(config), "n_classes": n_classes,
-                "classes": train_dataset.classes, "epoch": epoch, "val": row,
+                "classes": source.classes, "epoch": epoch, "val": row,
             }, best_path)
         log(f"{name} epoch {epoch:3d}  train {row['train_loss']:.4f}  val {row['val_loss']:.4f}  "
             f"dice {row['val_dice']:.3f}  distance err {row['val_distance_error_cm']:.2f} cm  "

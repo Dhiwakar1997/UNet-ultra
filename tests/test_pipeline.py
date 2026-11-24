@@ -110,3 +110,19 @@ def test_coreml_conversion(tmp_path):
     assert [i.name for i in spec.description.input] == ["image", "meta"]
     assert [o.name for o in spec.description.output] == ["mask_logits", "depth"]
     assert (tmp_path / "m.mlpackage").is_dir()
+
+
+def test_single_session_fallback_holds_out_the_last_block(fake_zips, calibration, tmp_path):
+    from torch.utils.data import Subset
+    from unetultra.train import split_single_session
+
+    one = fake_zips["train"][:1]
+    train_indices, val_indices = split_single_session(SessionDataset(one, calibration, size=SMALL))
+    assert val_indices == [7, 8] and train_indices == list(range(7))  # contiguous, last, never shuffled
+    train = Subset(SessionDataset(one, calibration, augment=True, size=SMALL), train_indices)
+    val = Subset(SessionDataset(one, calibration, size=SMALL), val_indices)
+    history, best = fit(train, val, TrainConfig(epochs=1, batch_size=4, features=(8, 16)), tmp_path, name="one",
+                        device="cpu", log=lambda *_: None)
+    assert len(history) == 1 and load_model(best)[1]["classes"] == ["background", "airpods_case"]
+    with pytest.raises(ValueError, match="at least 8"):
+        split_single_session(list(range(5)))

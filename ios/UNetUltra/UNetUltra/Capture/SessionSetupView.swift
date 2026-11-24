@@ -8,6 +8,8 @@ struct SessionSetupView: View {
 
     @State private var classList = "airpods_case"
     @State private var split = SessionSplit.train
+    @AppStorage("captureTarget.train") private var trainTarget = CapturePlan.defaultTarget(for: .train)
+    @AppStorage("captureTarget.test") private var testTarget = CapturePlan.defaultTarget(for: .test)
 
     var body: some View {
         NavigationStack {
@@ -20,6 +22,8 @@ struct SessionSetupView: View {
                         ForEach(SessionSplit.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                    Stepper("Target: \(split == .train ? trainTarget : testTarget) samples",
+                            value: split == .train ? $trainTarget : $testTarget, in: 10...500, step: 10)
                     Button("Start new session") {
                         store.startSession(
                             classes: classList.split(separator: ",").map(String.init), split: split,
@@ -31,7 +35,8 @@ struct SessionSetupView: View {
                 } header: {
                     Text("New session")
                 } footer: {
-                    Text("The session id is created automatically. \"background\" is always class 0. "
+                    Text("The guide under the preview spreads the target over 15–70 cm and about 10% no-object shots. "
+                         + "The session id is created automatically. \"background\" is always class 0. "
                          + "A test session must come from a different room or day than the training sessions.")
                 }
 

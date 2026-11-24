@@ -29,6 +29,11 @@ struct CaptureGuidanceView: View {
             "About 1 in 10 samples with no case in view: press No object.",
             "Include scenes that look like where the case usually sits.",
         ]),
+        Topic(title: "The guide under the preview", items: [
+            "It shows how many samples each distance band has and what to capture next.",
+            "Default plan: 100 samples for a training session, 20 for a test session.",
+            "A sample counts for the band its LiDAR distance falls in; extra samples in a full band do not count.",
+        ]),
         Topic(title: "Sessions", items: [
             "Each session is entirely train or test.",
             "Capture the test session in a different room or on a different day.",

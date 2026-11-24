@@ -14,6 +14,15 @@ struct CaptureView: View {
     @State private var showMeasurements = false
     @State private var exportItem: ExportItem?
     @State private var isExporting = false
+    @AppStorage("captureTarget.train") private var trainTarget = CapturePlan.defaultTarget(for: .train)
+    @AppStorage("captureTarget.test") private var testTarget = CapturePlan.defaultTarget(for: .test)
+
+    /// Progress of the current session against its plan, or nil before a session is started.
+    private var progress: CaptureProgress? {
+        guard let manifest = store.manifest else { return nil }
+        let target = manifest.split == .train ? trainTarget : testTarget
+        return CaptureProgress(plan: CapturePlan(split: manifest.split, totalTarget: target), samples: store.samples)
+    }
 
     var body: some View {
         NavigationStack {
@@ -21,6 +30,12 @@ struct CaptureView: View {
                 if captureService.isLiDARAvailable {
                     cameraArea
                     statusLines
+                    if let progress {
+                        CaptureGuideView(
+                            progress: progress,
+                            tapAdvice: model.pendingObjects.isEmpty
+                                ? nil : progress.tapAdvice(distanceM: model.lastTapDistanceM))
+                    }
                     controls
                 } else {
                     LiDARStatusView(availability: captureService.availability)

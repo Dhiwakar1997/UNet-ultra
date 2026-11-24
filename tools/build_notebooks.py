@@ -155,9 +155,17 @@ VAL_SESSIONS = None         # e.g. ["../data/session_....zip"]; None holds out a
 from unetultra.session import find_sessions
 from unetultra.train import split_sessions
 
-train_paths, val_paths = split_sessions(find_sessions(DATA, "train"), VAL_SESSIONS)
-print("train:", *train_paths, sep="\\n  ")
-print("validation:", *val_paths, sep="\\n  ")
+all_train_paths = find_sessions(DATA, "train")
+SINGLE_SESSION = len(all_train_paths) == 1 and not VAL_SESSIONS
+if SINGLE_SESSION:
+    train_paths = val_paths = all_train_paths
+    print("One training session:", all_train_paths[0])
+    print("Its last 20% of samples are held out for validation. They come from the same room and day,")
+    print("so validation numbers will flatter the model; trust only the test session in 03_evaluate.")
+else:
+    train_paths, val_paths = split_sessions(all_train_paths, VAL_SESSIONS)
+    print("train:", *train_paths, sep="\\n  ")
+    print("validation:", *val_paths, sep="\\n  ")
 """),
     md("""
 ## Lens calibration
@@ -179,14 +187,22 @@ plots.calibration_fit(calibration, points);
     code("""
 from unetultra.dataset import SessionDataset
 
-train_set = SessionDataset(train_paths, calibration, augment=True)
-val_set = SessionDataset(val_paths, calibration)
+from torch.utils.data import Subset
+from unetultra.train import split_single_session
+
+full_train = SessionDataset(train_paths, calibration, augment=True)
+full_val = SessionDataset(val_paths, calibration)
+if SINGLE_SESSION:
+    train_indices, val_indices = split_single_session(full_train)
+    train_set, val_set = Subset(full_train, train_indices), Subset(full_val, val_indices)
+else:
+    train_set, val_set = full_train, full_val
 background = sum(int(train_set[i]["instances"].max()) == 0 for i in range(len(train_set)))
-print(f"train {len(train_set)} samples ({train_set.skipped} skipped as not accepted), validation {len(val_set)}")
-for path, sample_id, reason in train_set.excluded + val_set.excluded:
+print(f"train {len(train_set)} samples ({full_train.skipped} skipped as not accepted), validation {len(val_set)}")
+for path, sample_id, reason in full_train.excluded + ([] if SINGLE_SESSION else full_val.excluded):
     print(f"  {reason}: {Path(path).name} sample {sample_id}")
 print(f"background-only share of training samples: {background / max(len(train_set), 1):.0%} (aim for about 10%)")
-print("classes:", train_set.classes)
+print("classes:", full_train.classes)
 """),
     md("## Train the model"),
     code("""
@@ -202,10 +218,11 @@ print("best checkpoint:", checkpoint)
 from dataclasses import replace
 
 ablation_config = replace(config, use_meta=False)
-ablation_history, ablation_checkpoint = fit(
-    SessionDataset(train_paths, calibration, augment=True, use_meta=False),
-    SessionDataset(val_paths, calibration, use_meta=False),
-    ablation_config, MODELS, name="model_image_only")
+ablation_train = SessionDataset(train_paths, calibration, augment=True, use_meta=False)
+ablation_val = SessionDataset(val_paths, calibration, use_meta=False)
+if SINGLE_SESSION:
+    ablation_train, ablation_val = Subset(ablation_train, train_indices), Subset(ablation_val, val_indices)
+ablation_history, ablation_checkpoint = fit(ablation_train, ablation_val, ablation_config, MODELS, name="model_image_only")
 """),
     md("## Learning curves"),
     code("""

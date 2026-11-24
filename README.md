@@ -95,8 +95,11 @@ The first command checks every sample against the data contract. The second writ
 per sample (depth edges in red on the photo: they should trace the object's outline) and prints
 how many valid LiDAR pixels land on the object at each distance, with a safe minimum distance.
 
-You need at least **two training sessions** (one whole session is held out for validation) and
-one **test session** from a different room or day, marked *test* when you start it in the app.
+The smallest useful set is **one training session of about 100 samples** and **one test session
+of about 20**, captured in a different room or on a different day and marked *test* when you
+start it in the app. With a single training session, `02_train` holds out the last 20% of its
+samples for validation; those numbers flatter the model, so trust only the test session. Two or
+more training sessions give a proper whole-session validation split.
 
 ### 2. Notebooks
 
@@ -168,11 +171,16 @@ The project uses file-system-synchronised groups (Xcode 16+): any file added und
    tap it. A tap outside the square is refused. The lens focuses there and a numbered marker appears; the status
    line shows the lens position and the LiDAR distance at the tap. Tap more objects if there are
    several.
-3. Press **Capture** to save one synchronized RGB + depth sample. Press **No object** for a
+3. Follow the **guide** under the preview. It shows progress against the session's target
+   (100 samples for train, 20 for test; change it in the session sheet), how many samples each
+   distance band has (15–25, 25–35, 35–45, 45–55, 55–70 cm, plus "none" for no-object shots),
+   and what to capture next. After a tap it tells you which band that distance counts for, or
+   that the band is full.
+4. Press **Capture** to save one synchronized RGB + depth sample. Press **No object** for a
    background-only sample (aim for about 1 in 10).
-4. The ruler button holds optional measured width, height, facing and distance.
-5. The gallery button shows thumbnails with tap markers; touch and hold one to delete it.
-6. The share button exports `session_<id>.zip` (AirDrop it to the Mac and move it to `data/`).
+5. The ruler button holds optional measured width, height, facing and distance.
+6. The gallery button shows thumbnails with tap markers; touch and hold one to delete it.
+7. The share button exports `session_<id>.zip` (AirDrop it to the Mac and move it to `data/`).
 
 The question-mark button shows the capture checklist: case closed in the same cover; 15–70 cm
 with varied distance, angle and visible face; lying flat, standing and held in the hand; varied
