@@ -62,12 +62,20 @@ class Sam2Predictor:
         with torch.no_grad():
             outputs = self.model(**inputs, multimask_output=True)
         masks = self.processor.post_process_masks(outputs.pred_masks.cpu(), original_sizes)[0]
-        best = int(outputs.iou_scores[0, 0].argmax())
-        return masks[0, best].numpy().astype(bool)
+        scores = outputs.iou_scores[0, 0].cpu().tolist()
+        candidates = [(masks[0, i].numpy().astype(bool), float(scores[i])) for i in range(len(scores))]
+        return sorted(candidates, key=lambda c: -c[1])
 
     def predict(self, image, points, labels):
         """image: uint8 [H, W, 3]; points: [[x, y], ...] in image pixels; labels: 1 positive, 0 negative.
-        Returns a boolean [H, W] mask for the one object the points describe."""
+        Returns a boolean [H, W] mask for the one object the points describe (SAM's top-scored guess)."""
+        return self.predict_candidates(image, points, labels)[0][0]
+
+    def predict_candidates(self, image, points, labels):
+        """All of SAM's guesses for the prompt, as [(mask, score), ...], best score first.
+
+        A single click is ambiguous (a part, the object, or the object plus its surroundings),
+        so SAM returns three masks; the caller can choose between them."""
         try:
             return self._run(image, points, labels)
         except (RuntimeError, NotImplementedError):
@@ -107,6 +115,7 @@ class ReviewItem:
     sample_id: str
     meta: dict
     masks: list = field(default_factory=list)  # one boolean [H, W] mask per object
+    candidates: dict = field(default_factory=dict)  # object index -> SAM's alternative masks, chosen one first
     status: str = "pending"
     dirty: bool = False
 
@@ -121,8 +130,11 @@ class MaskReview:
     Typical use: run() -> look at the grid -> add_click() / set_status() -> save().
     Background-only samples get an empty mask and are accepted automatically."""
 
-    def __init__(self, paths, predictor):
+    def __init__(self, paths, predictor, object_size_cm=5.5):
         self.predictor = predictor
+        # Rough real size of the object. With one click SAM offers a part, the object and a
+        # larger region; the guess whose area best fits this size at the LiDAR distance wins.
+        self.object_size_cm = object_size_cm
         self.paths = [str(p) for p in paths]
         self.items = []
         for path in self.paths:
@@ -142,10 +154,54 @@ class MaskReview:
         with Session(item.path) as sess:
             return sess.image(item.sample_id)
 
-    def _predict_object(self, image, obj):
-        points = [obj["tap_point_image"]] + [p["point"] for p in obj.get("extra_points", [])]
-        labels = [1] + [1 if p["positive"] else 0 for p in obj.get("extra_points", [])]
-        return self.predictor.predict(image, points, labels)
+    @staticmethod
+    def prompts(obj):
+        """The point prompts for one object: its tap (unless moved) plus any corrective clicks."""
+        extra = obj.get("extra_points", [])
+        points = [p["point"] for p in extra]
+        labels = [1 if p["positive"] else 0 for p in extra]
+        if not obj.get("ignore_tap"):
+            points, labels = [obj["tap_point_image"]] + points, [1] + labels
+        return points, labels
+
+    def expected_area_px(self, obj, meta):
+        """Area in pixels an object of the nominal size should cover at its LiDAR distance, or None."""
+        distance = obj.get("lidar_distance_at_tap_m")
+        if not self.object_size_cm or not distance or not meta:
+            return None
+        k = meta["intrinsics_image"]
+        size_m = self.object_size_cm / 100
+        return (k["fx"] * size_m / distance) * (k["fy"] * size_m / distance)
+
+    def _candidate_masks(self, image, obj, meta=None):
+        """SAM's guesses for one object, the preferred one first."""
+        points, labels = self.prompts(obj)
+        if not points:
+            return [np.zeros(image.shape[:2], dtype=bool)]
+        if not hasattr(self.predictor, "predict_candidates"):
+            return [self.predictor.predict(image, points, labels)]
+        scored = self.predictor.predict_candidates(image, points, labels)
+        expected = self.expected_area_px(obj, meta)
+        if expected and len(points) == 1:
+            # One click: prefer the guess closest to the expected size, among credible ones.
+            best_score = max(score for _, score in scored)
+            def misfit(candidate):
+                mask, score = candidate
+                area = max(int(mask.sum()), 1)
+                return abs(np.log(area / expected)) + (10 if score < 0.5 * best_score else 0)
+            scored = sorted(scored, key=misfit)
+        return [mask for mask, _ in scored]
+
+    def _predict_object(self, image, obj, meta=None):
+        return self._candidate_masks(image, obj, meta)[0]
+
+    def _repredict(self, item, object_index):
+        obj = item.meta["objects"][object_index]
+        obj.pop("manual_polygon", None)
+        masks = self._candidate_masks(self.image(item), obj, item.meta)
+        item.candidates[object_index] = masks
+        item.masks[object_index] = masks[0]
+        item.dirty = True
 
     def run(self, redo=False, progress=None):
         """Predict masks for every sample that has none yet (or all of them with redo=True)."""
@@ -160,7 +216,7 @@ class MaskReview:
             if progress:
                 progress(n + 1, len(self.items), item.sample_id)
             image = self.image(item)
-            item.masks = [self._predict_object(image, obj) for obj in objects]
+            item.masks = [self._predict_object(image, obj, item.meta) for obj in objects]
             item.status, item.dirty = "pending", True
 
     def add_click(self, key, object_index, x, y, positive=True):
@@ -168,15 +224,56 @@ class MaskReview:
         item = self[key]
         obj = item.meta["objects"][object_index]
         obj.setdefault("extra_points", []).append({"point": [float(x), float(y)], "positive": bool(positive)})
-        item.masks[object_index] = self._predict_object(self.image(item), obj)
-        item.dirty = True
+        self._repredict(item, object_index)
 
     def clear_clicks(self, key, object_index):
-        """Remove an object's corrective clicks and go back to the mask from the tap alone."""
+        """Remove every correction to an object and go back to the mask from the tap alone."""
         item = self[key]
         obj = item.meta["objects"][object_index]
         obj["extra_points"] = []
-        item.masks[object_index] = self._predict_object(self.image(item), obj)
+        obj.pop("ignore_tap", None)
+        self._repredict(item, object_index)
+
+    def move_tap(self, key, object_index, x, y):
+        """Start again from a new point, for a tap that landed beside the object.
+
+        The saved tap is kept in meta.json but no longer used as a prompt (ignore_tap)."""
+        item = self[key]
+        obj = item.meta["objects"][object_index]
+        obj["ignore_tap"] = True
+        obj["extra_points"] = [{"point": [float(x), float(y)], "positive": True}]
+        self._repredict(item, object_index)
+
+    def next_candidate(self, key, object_index):
+        """Switch to SAM's next alternative guess for the same clicks. Returns (position, count)."""
+        item = self[key]
+        if object_index not in item.candidates:
+            obj = item.meta["objects"][object_index]
+            item.candidates[object_index] = self._candidate_masks(self.image(item), obj, item.meta)
+            current = 0
+        else:
+            masks = item.candidates[object_index]
+            current = next((i for i, m in enumerate(masks) if m is item.masks[object_index]), -1)
+        masks = item.candidates[object_index]
+        chosen = (current + 1) % len(masks)
+        item.masks[object_index] = masks[chosen]
+        item.meta["objects"][object_index].pop("manual_polygon", None)
+        item.dirty = True
+        return chosen + 1, len(masks)
+
+    def set_polygon(self, key, object_index, points):
+        """Replace an object's mask with a hand-drawn outline: [[x, y], ...] in image pixels."""
+        from PIL import Image, ImageDraw
+
+        if len(points) < 3:
+            raise ValueError("an outline needs at least three points")
+        item = self[key]
+        width, height = item.meta["image_size"]
+        canvas = Image.new("L", (width, height), 0)
+        ImageDraw.Draw(canvas).polygon([(float(x), float(y)) for x, y in points], fill=1, outline=1)
+        item.masks[object_index] = np.asarray(canvas, dtype=bool)
+        item.candidates.pop(object_index, None)
+        item.meta["objects"][object_index]["manual_polygon"] = [[float(x), float(y)] for x, y in points]
         item.dirty = True
 
     def set_status(self, key, status):
@@ -264,6 +361,8 @@ def main(argv=None):
     parser.add_argument("--redo", action="store_true", help="predict again for samples that already have masks")
     parser.add_argument("--limit", type=int, help="stop after this many samples (for a quick check)")
     parser.add_argument("--stall-seconds", type=int, default=120)
+    parser.add_argument("--object-size-cm", type=float, default=5.5,
+                        help="rough real size of the object, used to choose between SAM's guesses (0 = top score)")
     args = parser.parse_args(argv)
 
     faulthandler.enable()
@@ -273,7 +372,7 @@ def main(argv=None):
         print(f"[{time.time() - started:6.0f}s] {message}", flush=True)
 
     say("reading sessions")
-    review = MaskReview(args.paths, predictor=None)
+    review = MaskReview(args.paths, predictor=None, object_size_cm=args.object_size_cm)
     todo = [item for item in review.items if item.meta["objects"] and (args.redo or not item.masks)]
     if args.limit:
         todo = todo[: args.limit]
@@ -286,7 +385,7 @@ def main(argv=None):
         say(f"{n}/{len(todo)}  sample {item.sample_id}  ({len(item.meta['objects'])} object(s))")
         faulthandler.dump_traceback_later(args.stall_seconds, file=sys.stderr)
         image = review.image(item)
-        item.masks = [review._predict_object(image, obj) for obj in item.meta["objects"]]
+        item.masks = [review._predict_object(image, obj, item.meta) for obj in item.meta["objects"]]
         faulthandler.cancel_dump_traceback_later()
         item.status, item.dirty = "pending", True
         if n % 25 == 0:

@@ -116,3 +116,91 @@ def test_sam2_wrapper_plumbing_with_random_weights():
     image = np.random.default_rng(0).integers(0, 255, (192, 256, 3), dtype=np.uint8)
     mask = predictor.predict(image, [[100.0, 80.0], [20.0, 20.0]], [1, 0])
     assert mask.shape == (192, 256) and mask.dtype == bool
+
+
+class ThreeGuessPredictor(DiscPredictor):
+    """Like SAM with one click: a small part, the object, and a much larger region, part scored highest."""
+
+    def predict_candidates(self, image, points, labels):
+        guesses = []
+        for radius, score in ((4, 0.95), (12, 0.90), (60, 0.85)):
+            self.radius = radius
+            guesses.append((DiscPredictor.predict(self, image, points, labels), score))
+        return guesses
+
+
+def test_expected_size_picks_the_object_not_a_part(pending_zip):
+    review = MaskReview([pending_zip], ThreeGuessPredictor())
+    review.run()
+    item = next(item for item in review.items if item.meta["objects"])
+    obj = item.meta["objects"][0]
+    expected = review.expected_area_px(obj, item.meta)
+    areas = {radius: 3.14159 * radius**2 for radius in (4, 12, 60)}
+    best_radius = min(areas, key=lambda r: abs(np.log(areas[r] / expected)))
+    assert item.masks[0].sum() == pytest.approx(areas[best_radius], rel=0.15)
+    # Without the size hint the top-scored guess (the small part) is used.
+    plain = MaskReview([pending_zip], ThreeGuessPredictor(), object_size_cm=None)
+    plain.run(redo=True)
+    assert plain[item.key].masks[0].sum() == pytest.approx(areas[4], rel=0.2)
+    # The other guesses can be cycled through and come back round.
+    seen = {int(item.masks[0].sum())}
+    for _ in range(3):
+        position, count = review.next_candidate(item.key, 0)
+        seen.add(int(item.masks[0].sum()))
+    assert count == 3 and len(seen) == 3 and position == 1
+
+
+def test_step_review_accepts_rejects_and_edits(pending_zip):
+    from unetultra.review_ui import StepReview
+
+    review = MaskReview([pending_zip], DiscPredictor())
+    review.run()
+    stepper = StepReview(review, autosave_every=2, log=lambda *_: None)
+    assert len(stepper.queue) == 4 and "1 of 4" in stepper.describe()
+
+    first = stepper.item
+    x, y = first.meta["objects"][0]["tap_point_image"]
+    area = first.masks[0].sum()
+    stepper.set_mode("add")
+    stepper.click(x + 10, y)
+    assert first.masks[0].sum() > area
+
+    # A tap beside the object: restart from a new point; the old tap is no longer a prompt.
+    stepper.set_mode("restart")
+    stepper.click(x + 40, y + 5)
+    obj = first.meta["objects"][0]
+    assert obj["ignore_tap"] and obj["tap_point_image"] == [x, y]
+    assert first.masks[0][int(y + 5), int(x + 40)] and not first.masks[0][int(y), int(x)]
+
+    # Hand-drawn outline replaces the mask entirely.
+    stepper.set_mode("outline")
+    for point in ((50, 40), (90, 40), (90, 80), (50, 80)):
+        stepper.click(*point)
+    stepper.close_outline()
+    assert first.masks[0][60, 70] and not first.masks[0][20, 20]
+    assert first.masks[0].sum() == pytest.approx(41 * 41, rel=0.05)
+    assert len(obj["manual_polygon"]) == 4
+
+    x0, x1, y0, y1 = stepper.view_box()
+    assert x1 - x0 < first.meta["image_size"][0] or y1 - y0 < first.meta["image_size"][1]
+
+    stepper.accept()
+    assert first.status == "accepted" and stepper.position == 1
+    stepper.reject()  # second decision triggers the autosave
+    with Session(pending_zip) as sess:
+        assert sess.mask_status(first.sample_id) == "accepted"
+        saved = sess.instances(first.sample_id) == 1
+        assert saved.sum() == first.masks[0].sum()
+        assert sess.meta(first.sample_id)["objects"][0]["manual_polygon"]
+    stepper.back()
+    assert stepper.position == 1
+    while not stepper.finished:
+        stepper.accept()
+    assert "reviewed" in stepper.describe() and review.counts()["pending"] == 0
+    assert validate_session(pending_zip).ok
+
+    # Reset removes every correction.
+    again = MaskReview([pending_zip], DiscPredictor())
+    again.clear_clicks(first.key, 0)
+    restored = again[first.key].meta["objects"][0]
+    assert "ignore_tap" not in restored and "manual_polygon" not in restored and restored["extra_points"] == []

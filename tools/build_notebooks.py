@@ -38,15 +38,19 @@ write("01_masks", [
     md("""
 # 01 · Masks
 
-Turn the tap points saved on the phone into masks with **SAM 2**, then review them.
+Turn the tap points saved on the phone into masks with **SAM 2**, then review them one by one.
 
-1. SAM 2.1 runs once per tapped object, with the tap as a positive point.
-2. You look through the grid and mark each sample **accepted** or **rejected**.
-3. A bad mask can be fixed with extra positive / negative clicks.
-4. `labels.png`, `instances.png`, the extra clicks and `mask_status` are written back into each zip.
+1. SAM 2.1 runs once per tapped object, with the tap as a positive point. Of SAM's guesses, the
+   one whose size best fits a ~5.5 cm object at the measured distance is used.
+2. You step through the samples: **accept**, **reject**, or **edit** the mask and then accept.
+3. `labels.png`, `instances.png`, your edits and `mask_status` are written back into each zip.
 
 SAM is used only here, to make training labels. It is never used at inference.
-The first run downloads the SAM 2.1 weights from Hugging Face (about 180 MB for *small*).
+
+Run this notebook in **Jupyter Lab in the browser** (`jupyter lab notebooks`); the click-to-edit
+image needs it. It is quickest to make the masks from a terminal first, with
+`python -m unetultra.masks data/*.zip` (add `--redo` to start again from scratch): this notebook
+then loads them and goes straight to the review.
 """),
     code(SETUP),
     code("""
@@ -57,58 +61,68 @@ ZIPS = find_sessions(DATA)          # or list the zips you want: ["../data/sessi
 for path in ZIPS:
     print(validate_session(path).format())
 """),
-    md("## Run SAM 2 from the tap points\n\nSamples that already have masks are left alone; pass `redo=True` to start again."),
+    md("## Load SAM 2\n\nNeeded for editing, and for any sample that has no mask yet."),
     code("""
 from unetultra.masks import Sam2Predictor
 
-# CPU is the safe choice (a second or two per object). device="mps" can be faster but has been seen to stall.
+# CPU is the safe choice (about a second per object). device="mps" has been seen to stall.
 predictor = Sam2Predictor("facebook/sam2.1-hiera-small", device="cpu")   # or "facebook/sam2.1-hiera-base-plus"
 print("SAM 2 running on", predictor.device)
 """, tag="predictor"),
     code("""
+import time
 from unetultra.masks import MaskReview
 
-import time
-
-review = MaskReview(ZIPS, predictor)
+review = MaskReview(ZIPS, predictor, object_size_cm=5.5)
 started = time.time()
-# One line per sample, printed before SAM runs on it, so a stall is visible straight away.
+# Only samples without a saved mask are run. One line each, printed before SAM starts on it.
 review.run(progress=lambda done, total, sample_id: print(
     f"{done}/{total}  sample {sample_id}  ({time.time() - started:.0f}s so far)", flush=True))
 print(f"done in {time.time() - started:.0f}s")
 review.counts()
 """),
     md("""
-## Review
+## Review one by one
 
-Each tile shows the mask tint and the tap (yellow cross). Set every sample to **accepted** or
-**rejected**; change `page` to move through the session, or pass `only="pending"`.
-Background-only samples have an empty mask and are accepted automatically.
+The picture is zoomed on the tapped object; the mask is tinted with a white edge, and the tap is
+the yellow cross.
+
+- **accept & next** / **reject & next**: decide and move on. **back** returns to the previous one.
+- If the mask is wrong, pick a mode and click on the picture:
+  - **add to mask**: click a part of the case that is missing.
+  - **remove from mask**: click something wrongly covered (table, hand).
+  - **restart from click**: the tap landed beside the case; click the case and SAM starts again there.
+  - **draw outline**: click points around the case, then **close outline**. That shape becomes the mask.
+- **other SAM guess** switches between SAM's alternative masks for the same clicks.
+- **reset mask** undoes every edit; **zoom in/out** shows the whole photo.
+
+Progress is saved every 10 decisions and when you reach the end, so you can stop and come back:
+re-running the notebook continues with the samples still pending.
+"""),
+    code("""
+%matplotlib widget
+from unetultra.review_ui import step_review
+
+panel, stepper = step_review(review, only="pending")   # only=None to go through every sample again
+panel
+""", tag="interactive"),
+    md("## Save and check\n\nSaves anything not yet written and validates the zips."),
+    code("""
+print(review.save())
+for path in ZIPS:
+    print(validate_session(path).format())
+"""),
+    md("""
+## Overview grid (optional)
+
+All samples at a glance, 12 per page, to spot anything you want to revisit. To redo one, run
+`stepper = step_review(review, only=None)` above, or set it back to pending here and re-run the
+review cell.
 """),
     code("""
 from unetultra.review_ui import review_grid
 
 review_grid(review, page=0, per_page=12)
-"""),
-    md("""
-## Fix a mask
-
-Pick a sample and object, choose *add to mask* or *remove from mask*, and click on the image.
-SAM re-runs with every click. The clicks are saved in `meta.json` as `extra_points`.
-"""),
-    code("""
-%matplotlib widget
-from unetultra.review_ui import fix_mask
-
-item = next(item for item in review.items if item.meta["objects"])   # or review[(ZIPS[0], "0007")]
-fix_mask(review, item.key, object_index=0)
-""", tag="interactive"),
-    md("## Save\n\nNothing is written until this cell runs. Uncomment the first line to accept everything still pending."),
-    code("""
-# review.accept_all_pending()
-print(review.save())
-for path in ZIPS:
-    print(validate_session(path).format())
 """),
     md("""
 ## Check against the fake session's known shapes

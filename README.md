@@ -118,7 +118,7 @@ jupyter lab notebooks
 
 | Notebook | What it does | Output |
 | --- | --- | --- |
-| `01_masks` | SAM 2.1 mask per tapped object; review grid; extra clicks to fix a mask | `labels.png`, `instances.png`, `mask_status` written into each zip |
+| `01_masks` | Step through SAM 2.1's masks one by one: accept, reject, or edit (extra clicks, restart from a new point, or draw the outline by hand) | `labels.png`, `instances.png`, `mask_status` written into each zip |
 | `02_train` | Lens calibration; trains the model and the image-only ablation | `models/calibration.json`, `models/model.pt`, `models/model_image_only.pt` |
 | `03_evaluate` | Scores both models and the focus-only baseline on the test zip | metrics, plots, a generated verdict |
 | `04_export_coreml` | Converts to Core ML, compares with PyTorch, copies files for the app | `models/UNetUltra.mlpackage` |
