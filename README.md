@@ -168,16 +168,15 @@ The project uses file-system-synchronised groups (Xcode 16+): any file added und
 1. On first launch allow camera access. A session sheet opens: keep the class list
    (`airpods_case`), choose **train** or **test**, and start the session.
 2. Keep the case inside the square guide (the region the model sees; the rest is dimmed) and
-   tap it. A tap outside the square is refused. The lens focuses there and a numbered marker appears; the status
-   line shows the lens position and the LiDAR distance at the tap. Tap more objects if there are
-   several.
+   **tap it**. The lens focuses there and, once it settles, the sample is saved automatically;
+   you feel a short tap when it is. A tap outside the square, a focus that does not settle, or
+   a point with no LiDAR reading saves nothing and says why: just tap again.
 3. Follow the **guide** under the preview. It shows progress against the session's target
    (100 samples for train, 20 for test; change it in the session sheet), how many samples each
    distance band has (15–25, 25–35, 35–45, 45–55, 55–70 cm, plus "none" for no-object shots),
-   and what to capture next. After a tap it tells you which band that distance counts for, or
-   that the band is full.
-4. Press **Capture** to save one synchronized RGB + depth sample. Press **No object** for a
-   background-only sample (aim for about 1 in 10).
+   and what to capture next.
+4. Press **No object** for a background-only sample (aim for about 1 in 10). For several
+   objects in one photo, turn off **Tap to capture**, tap each object, then press **Capture**.
 5. The ruler button holds optional measured width, height, facing and distance.
 6. The gallery button shows thumbnails with tap markers; touch and hold one to delete it.
 7. The share button exports `session_<id>.zip` (AirDrop it to the Mac and move it to `data/`).

@@ -83,6 +83,40 @@ final class CaptureViewModel: ObservableObject {
         statusMessage = focus.settled ? nil : "Focus did not settle; tap again."
     }
 
+    /// Tap-to-capture: focus at the tap and, once the lens has settled on a point with a LiDAR
+    /// reading, save the sample straight away. A tap that cannot give a good sample saves
+    /// nothing and says why, so a second tap is all that is needed.
+    func tapAndCapture(devicePoint: CGPoint, service: CaptureService, store: SessionStore) async {
+        let before = pendingObjects.count
+        await handleTap(devicePoint: devicePoint, service: service, store: store)
+        guard pendingObjects.count > before else { return }  // refused: outside the square, no session, busy
+        guard lastFocus?.settled == true else {
+            clearTaps()
+            statusMessage = "Focus did not settle. Hold still and tap again."
+            feedback(success: false)
+            return
+        }
+        guard lastTapDistanceM != nil else {
+            clearTaps()
+            statusMessage = "No LiDAR reading at the tap. Move back a little and tap again."
+            feedback(success: false)
+            return
+        }
+        let saved = store.sampleCount
+        await capture(backgroundOnly: false, service: service, store: store)
+        if store.sampleCount > saved {
+            feedback(success: true)
+        } else {
+            clearTaps()
+            feedback(success: false)
+        }
+    }
+
+    /// A short haptic so a save (or a refused tap) can be felt without looking at the status line.
+    private func feedback(success: Bool) {
+        UINotificationFeedbackGenerator().notificationOccurred(success ? .success : .warning)
+    }
+
     func clearTaps() {
         pendingObjects = []
         focusTapIndex = 0

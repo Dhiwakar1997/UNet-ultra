@@ -13,7 +13,8 @@ struct CaptureGuidanceView: View {
     private let sections: [Topic] = [
         Topic(title: "The object", items: [
             "Case closed, always in the same cover.",
-            "Tap the case to focus on it, wait for the marker, then press Capture.",
+            "Tap the case: the lens focuses and the sample is saved automatically (you feel a tap when it is).",
+            "For several objects in one photo, turn off Tap to capture, tap each object, then press Capture.",
             "Keep the whole case inside the square: the model only sees that part of the frame.",
         ]),
         Topic(title: "Distance and pose", items: [

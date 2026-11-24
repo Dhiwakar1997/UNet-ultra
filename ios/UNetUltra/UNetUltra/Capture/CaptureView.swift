@@ -14,6 +14,8 @@ struct CaptureView: View {
     @State private var showMeasurements = false
     @State private var exportItem: ExportItem?
     @State private var isExporting = false
+    /// On: a tap focuses and saves the sample in one go. Off: tap one or more objects, then press Capture.
+    @AppStorage("capture.autoCaptureOnTap") private var autoCapture = true
     @AppStorage("captureTarget.train") private var trainTarget = CapturePlan.defaultTarget(for: .train)
     @AppStorage("captureTarget.test") private var testTarget = CapturePlan.defaultTarget(for: .test)
 
@@ -67,7 +69,13 @@ struct CaptureView: View {
     private var cameraArea: some View {
         ZStack {
             CameraPreviewView(session: captureService.captureSession, proxy: previewProxy) { devicePoint in
-                Task { await model.handleTap(devicePoint: devicePoint, service: captureService, store: store) }
+                Task {
+                    if autoCapture {
+                        await model.tapAndCapture(devicePoint: devicePoint, service: captureService, store: store)
+                    } else {
+                        await model.handleTap(devicePoint: devicePoint, service: captureService, store: store)
+                    }
+                }
             }
             // The square the model will see; taps outside it are refused.
             if let configuration = captureService.configuration {
@@ -132,19 +140,25 @@ struct CaptureView: View {
                 .pickerStyle(.segmented)
             }
             HStack(spacing: 12) {
-                Button("Clear taps") { model.clearTaps() }
-                    .disabled(model.pendingObjects.isEmpty)
+                Toggle("Tap to capture", isOn: $autoCapture)
+                    .toggleStyle(.button)
                 Button("No object") {
                     Task { await model.capture(backgroundOnly: true, service: captureService, store: store) }
                 }
-                Button {
-                    Task { await model.capture(backgroundOnly: false, service: captureService, store: store) }
-                } label: {
-                    Label("Capture", systemImage: "camera.circle.fill")
+                // Manual mode, for several objects in one photo: tap each, then press Capture.
+                if !autoCapture {
+                    Button("Clear") { model.clearTaps() }
+                        .disabled(model.pendingObjects.isEmpty)
+                    Button {
+                        Task { await model.capture(backgroundOnly: false, service: captureService, store: store) }
+                    } label: {
+                        Label("Capture", systemImage: "camera.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.pendingObjects.isEmpty)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.pendingObjects.isEmpty)
             }
+            .onChange(of: autoCapture) { _, _ in model.clearTaps() }
             .buttonStyle(.bordered)
             .disabled(model.isBusy || !captureService.isRunning || store.manifest == nil)
         }
