@@ -147,3 +147,24 @@ def test_batches_move_to_a_device_without_float64(fake_zips, calibration):
     moved = _to_device(batch, "cpu")
     assert all(v.dtype != torch.float64 for v in moved.values() if torch.is_tensor(v))
     assert moved["sample_id"] == batch["sample_id"]
+
+
+def test_checkpoint_choice_ignores_a_lucky_early_epoch():
+    """A noisy early epoch with a low distance error but poor masks must not stay the "best"."""
+    from unetultra.train import checkpoint_score, is_new_best
+
+    def epoch(dice, error):
+        return {"val_dice": dice, "val_distance_error_cm": error, "val_loss": 1.0}
+
+    curve = [epoch(0.10, 30), epoch(0.30, 25), epoch(0.50, 6), epoch(0.70, 22), epoch(0.92, 12),
+             epoch(0.93, 11), epoch(0.93, 10), epoch(0.94, 13), epoch(0.90, 4)]
+    history, saved, kept = [], None, []
+    for number, row in enumerate(curve, start=1):
+        history.append(row)
+        if is_new_best(history, saved):
+            saved = {"score": checkpoint_score(history), "dice": row["val_dice"]}
+            kept.append(number)
+    assert 3 in kept            # the lucky epoch is taken at first, while it is the best known
+    assert kept[-1] == 7        # but well-trained epochs replace it; the best smoothed error wins
+    assert 9 not in kept        # a final fluke with clearly worse masks is ignored
+    assert checkpoint_score(history[:7]) == pytest.approx(11.0)

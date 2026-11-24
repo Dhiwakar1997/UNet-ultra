@@ -176,8 +176,38 @@ def validate(model, loader, device, config):
     }
 
 
+DICE_SLACK = 0.02
+SMOOTH_EPOCHS = 3
+
+
+def checkpoint_score(history):
+    """Validation object-distance error averaged over the last few epochs (validation loss if
+    there are no objects to measure). A single epoch's error on a small validation set jumps by
+    several centimetres, so one lucky early epoch must not be mistaken for the best model."""
+    recent = [row["val_distance_error_cm"] for row in history[-SMOOTH_EPOCHS:]]
+    if all(np.isfinite(recent)):
+        return float(np.mean(recent))
+    return history[-1]["val_loss"]
+
+
+def is_new_best(history, saved):
+    """Whether the latest epoch should replace the saved checkpoint.
+
+    `saved` is None or {"score", "dice"} of the saved checkpoint. An epoch qualifies only if its
+    mask quality is within DICE_SLACK of the best seen so far; it then wins on a lower smoothed
+    distance error, or outright if the saved checkpoint's masks have since been clearly bettered."""
+    row = history[-1]
+    best_dice = max(r["val_dice"] for r in history)
+    if row["val_dice"] < best_dice - DICE_SLACK:
+        return False
+    if saved is None or saved["dice"] < best_dice - DICE_SLACK:
+        return True
+    return checkpoint_score(history) < saved["score"]
+
+
 def fit(train_dataset, val_dataset, config, out_dir, name="model", device=None, log=print):
-    """Train UNetMulti and keep the checkpoint with the lowest validation object-distance error.
+    """Train a model and keep the best checkpoint: the lowest validation object-distance error
+    (smoothed over a few epochs) among epochs whose masks are as good as any seen (is_new_best).
 
     Returns (history, best_checkpoint_path). History is a list of per-epoch dicts and is also
     written next to the checkpoint as <name>_history.json."""
@@ -197,7 +227,7 @@ def fit(train_dataset, val_dataset, config, out_dir, name="model", device=None, 
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    best_path, best_score, history = out_dir / f"{name}.pt", float("inf"), []
+    best_path, saved, history = out_dir / f"{name}.pt", None, []
 
     for epoch in range(1, config.epochs + 1):
         model.train()
@@ -214,9 +244,9 @@ def fit(train_dataset, val_dataset, config, out_dir, name="model", device=None, 
         row = {"epoch": epoch, "train_loss": sums[0] / len(train_loader), "train_mask_loss": sums[1] / len(train_loader),
                "train_depth_loss": sums[2] / len(train_loader), **validate(model, val_loader, device, config)}
         history.append(row)
-        score = row["val_distance_error_cm"] if np.isfinite(row["val_distance_error_cm"]) else row["val_loss"]
-        if score < best_score:
-            best_score = score
+        improved = is_new_best(history, saved)
+        if improved:
+            saved = {"score": checkpoint_score(history), "dice": row["val_dice"]}
             torch.save({
                 "state_dict": model.state_dict(), "config": asdict(config), "n_classes": n_classes,
                 "architecture": config.architecture, "sessions": sorted({Path(p).name for p in source.paths}),
@@ -224,7 +254,7 @@ def fit(train_dataset, val_dataset, config, out_dir, name="model", device=None, 
             }, best_path)
         log(f"{name} epoch {epoch:3d}  train {row['train_loss']:.4f}  val {row['val_loss']:.4f}  "
             f"dice {row['val_dice']:.3f}  distance err {row['val_distance_error_cm']:.2f} cm  "
-            f"({time.time() - start:.0f}s){'  *' if score == best_score else ''}")
+            f"({time.time() - start:.0f}s){'  *' if improved else ''}")
     (out_dir / f"{name}_history.json").write_text(json.dumps(history, indent=2))
     return history, best_path
 
