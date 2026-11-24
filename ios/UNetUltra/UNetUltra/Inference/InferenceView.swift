@@ -5,28 +5,15 @@ import UniformTypeIdentifiers
 /// size, with the LiDAR reading beside them for comparison.
 struct InferenceView: View {
     @EnvironmentObject private var captureService: CaptureService
+    @EnvironmentObject private var store: ModelStore
+    /// Lens calibration: per device, separate from the models.
     @StateObject private var assets = ModelAssets()
     @StateObject private var model = InferenceViewModel()
 
     @State private var previewProxy = PreviewProxy()
-    @State private var importKind = ImportKind.calibration
     @State private var showImporter = false
     @State private var showMeasurements = false
     @State private var exportItem: ExportItem?
-
-    enum ImportKind {
-        case model, calibration
-
-        var contentTypes: [UTType] {
-            switch self {
-            case .calibration:
-                return [.json]
-            case .model:
-                let custom: [UTType?] = [UTType(filenameExtension: "mlpackage"), UTType(filenameExtension: "mlmodelc")]
-                return custom.compactMap { $0 } + [.package, .folder]
-            }
-        }
-    }
 
     var body: some View {
         NavigationStack {
@@ -45,16 +32,19 @@ struct InferenceView: View {
                     Spacer()
                 }
             }
-            .navigationTitle(assets.model?.descriptor.displayName ?? "Inference")
+            .navigationTitle(store.activeEntry?.displayName ?? "Inference")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbarContent }
             .sheet(isPresented: $showMeasurements) { MeasurementsView(measured: $model.measured) }
             .sheet(item: $exportItem) { item in ActivityView(items: [item.url]) }
-            .fileImporter(isPresented: $showImporter, allowedContentTypes: importKind.contentTypes) { outcome in
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.json]) { outcome in
                 handleImport(outcome)
             }
+            .failedSelfTestConfirmation(store: store)
+            .onChange(of: store.activeID) { _, _ in model.clearResult() }
             .task {
                 await assets.loadIfNeeded()
+                await store.loadIfNeeded()
                 await captureService.start()
             }
         }
@@ -65,10 +55,7 @@ struct InferenceView: View {
         case .failure(let error):
             assets.message = "Import failed: \(error.localizedDescription)"
         case .success(let url):
-            switch importKind {
-            case .calibration: assets.importCalibration(from: url)
-            case .model: Task { await assets.importModel(from: url) }
-            }
+            assets.importCalibration(from: url)
         }
     }
 
@@ -77,7 +64,9 @@ struct InferenceView: View {
     private var cameraArea: some View {
         ZStack {
             CameraPreviewView(session: captureService.captureSession, proxy: previewProxy) { devicePoint in
-                Task { await model.handleTap(devicePoint: devicePoint, service: captureService, assets: assets) }
+                Task {
+                    await model.handleTap(devicePoint: devicePoint, service: captureService, store: store, assets: assets)
+                }
             }
             if let configuration = captureService.configuration {
                 SquareGuideView(proxy: previewProxy, imageWidth: configuration.videoWidth,
@@ -102,7 +91,7 @@ struct InferenceView: View {
                     .position(point)
                     .allowsHitTesting(false)
             }
-            if model.isBusy || assets.isLoadingModel {
+            if model.isBusy || store.isLoadingModel {
                 ProgressView().tint(.white)
             }
             if captureService.permissionDenied {
@@ -120,18 +109,70 @@ struct InferenceView: View {
 
     private var assetStatus: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Label(assets.modelStatus, systemImage: assets.model == nil ? "exclamationmark.triangle" : "cube")
-                .foregroundStyle(assets.model == nil ? Color.orange : Color.secondary)
+            modelPicker
+            Text(modelDetail)
+                .foregroundStyle(store.activeModel == nil && !store.isLoadingModel ? Color.orange : Color.secondary)
             Label(assets.calibrationStatus,
                   systemImage: assets.calibration == nil ? "exclamationmark.triangle" : "scope")
                 .foregroundStyle(assets.calibration == nil ? Color.orange : Color.secondary)
-            if let message = model.statusMessage ?? assets.message ?? captureService.errorMessage {
+            if let message = model.statusMessage ?? store.message ?? assets.message ?? captureService.errorMessage {
                 Text(message).foregroundStyle(.orange)
             }
         }
         .font(.caption)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal)
+    }
+
+    /// The active model's name, always on screen; tapping it switches model or compute units.
+    private var modelPicker: some View {
+        Menu {
+            Section("Model") {
+                ForEach(store.entries) { entry in
+                    Button {
+                        Task { await store.activate(entry.id) }
+                    } label: {
+                        if entry.id == store.activeID {
+                            Label(entry.displayName, systemImage: "checkmark")
+                        } else if entry.needsConfirmation {
+                            Label(entry.displayName, systemImage: "exclamationmark.triangle")
+                        } else {
+                            Text(entry.displayName)
+                        }
+                    }
+                }
+            }
+            Picker("Run on", selection: Binding(
+                get: { store.computeUnits },
+                set: { units in Task { await store.setComputeUnits(units) } })
+            ) {
+                ForEach(ComputeUnitsOption.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: store.activeModel == nil ? "exclamationmark.triangle" : "cube")
+                Text(store.isLoadingModel ? "Loading model…" : (store.activeEntry?.displayName ?? "No model"))
+                    .bold()
+                    .lineLimit(1)
+                Text("· \(store.computeUnits.shortTitle)")
+                Image(systemName: "chevron.up.chevron.down")
+            }
+            .font(.footnote)
+        }
+        .disabled(store.isLoadingModel || model.isBusy)
+    }
+
+    /// Input size, inputs and rolling latency of the active model.
+    private var modelDetail: String {
+        guard let descriptor = store.activeModel?.descriptor else {
+            return store.isLoadingModel ? "Loading…" : ModelStore.missingModelHint
+        }
+        return "\(descriptor.inputWidth)×\(descriptor.inputHeight) · "
+            + (descriptor.metaFeatures.isEmpty ? "image only" : descriptor.metaFeatures.joined(separator: ", "))
+            + (descriptor.hasDepth ? "" : " · no depth output")
+            + " · \(store.latency.summary)"
     }
 
     // MARK: Numbers
@@ -223,20 +264,13 @@ struct InferenceView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            Menu {
-                Button("Import model (.mlpackage)…") {
-                    importKind = .model
-                    showImporter = true
-                }
-                Button("Import calibration.json…") {
-                    importKind = .calibration
-                    showImporter = true
-                }
+            // Models are imported in the Models tab; calibration belongs to the device and is imported here.
+            Button {
+                showImporter = true
             } label: {
-                Image(systemName: "square.and.arrow.down")
+                Image(systemName: "scope")
             }
-            .accessibilityLabel("Import model or calibration")
-            .disabled(assets.isLoadingModel)
+            .accessibilityLabel("Import calibration.json")
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
             Button { showMeasurements = true } label: {
@@ -255,5 +289,5 @@ struct InferenceView: View {
 }
 
 #Preview {
-    InferenceView().environmentObject(CaptureService())
+    InferenceView().environmentObject(CaptureService()).environmentObject(ModelStore())
 }

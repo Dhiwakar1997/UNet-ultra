@@ -19,6 +19,26 @@ struct ResultLog {
     let fileURL: URL
     let header: [String]
 
+    /// The log file to use in `directory`: `<baseName>.csv`, unless a file of that name already
+    /// exists with a different header (an older column set). Then `<baseName>_v2.csv`, `_v3` and
+    /// so on, so rows with different columns are never mixed in one file.
+    static func resolve(directory: URL, baseName: String, header: [String]) -> ResultLog {
+        let headerLine = CSV.line(header)
+        var version = 1
+        while true {
+            let name = version == 1 ? "\(baseName).csv" : "\(baseName)_v\(version).csv"
+            let url = directory.appendingPathComponent(name)
+            guard let text = try? String(contentsOf: url, encoding: .utf8), !text.isEmpty else {
+                return ResultLog(fileURL: url, header: header)
+            }
+            let firstLine = text.split(whereSeparator: { $0 == "\n" || $0 == "\r\n" }).first.map { String($0) } ?? ""
+            if firstLine == headerLine || version >= 50 {
+                return ResultLog(fileURL: url, header: header)
+            }
+            version += 1
+        }
+    }
+
     /// Append one row, creating the file with its header first if needed.
     func append(_ fields: [String]) throws {
         let manager = FileManager.default
@@ -56,7 +76,7 @@ struct InferenceLogRow {
         "timestamp", "model_name", "device_model", "lens_position", "focus_distance_cm",
         "pred_distance_cm", "pred_width_cm", "pred_height_cm", "lidar_distance_cm", "distance_diff_cm",
         "mask_area_px", "latency_ms", "class_label", "measured_width_cm", "measured_height_cm",
-        "measured_distance_cm", "notes",
+        "measured_distance_cm", "notes", "model_version", "architecture", "compute_units",
     ]
 
     var timestamp: String
@@ -86,7 +106,7 @@ struct InferenceLogRow {
             Self.number(result.latencyMs, digits: 1),
             result.classLabel,
             Self.number(measuredWidthCm), Self.number(measuredHeightCm), Self.number(measuredDistanceCm),
-            notes,
+            notes, result.modelVersion, result.architecture, result.computeUnits,
         ]
     }
 }

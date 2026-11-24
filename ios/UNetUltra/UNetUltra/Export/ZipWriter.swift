@@ -11,12 +11,21 @@ enum CRC32 {
     }
 
     static func checksum(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFF_FFFF
+        finish(update(start, with: data))
+    }
+
+    /// Running checksum for data that arrives in pieces: `finish(update(update(start, a), b))`.
+    static let start: UInt32 = 0xFFFF_FFFF
+
+    static func update(_ running: UInt32, with data: Data) -> UInt32 {
+        var crc = running
         for byte in data {
             crc = table[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8)
         }
-        return crc ^ 0xFFFF_FFFF
+        return crc
     }
+
+    static func finish(_ running: UInt32) -> UInt32 { running ^ 0xFFFF_FFFF }
 }
 
 enum ZipError: Error, Equatable {

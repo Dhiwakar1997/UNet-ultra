@@ -19,12 +19,13 @@ final class InferenceViewModel: ObservableObject {
 
     init() {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        log = ResultLog(fileURL: documents.appendingPathComponent("inference_log.csv"), header: InferenceLogRow.header)
+        // An older log with fewer columns is left alone; new rows then go to inference_log_v2.csv.
+        log = ResultLog.resolve(directory: documents, baseName: "inference_log", header: InferenceLogRow.header)
         logRowCount = log.rowCount()
     }
 
     /// Tap on the preview: focus there, wait for the lens, then run the model on the next frame.
-    func handleTap(devicePoint: CGPoint, service: CaptureService, assets: ModelAssets) async {
+    func handleTap(devicePoint: CGPoint, service: CaptureService, store: ModelStore, assets: ModelAssets) async {
         guard !isBusy, service.isRunning else { return }
         guard (0...1).contains(devicePoint.x), (0...1).contains(devicePoint.y) else { return }
         if let configuration = service.configuration,
@@ -34,10 +35,17 @@ final class InferenceViewModel: ObservableObject {
             statusMessage = CenterSquareCrop.outsideHint
             return
         }
-        guard let segmentation = assets.model else {
-            statusMessage = ModelAssets.missingModelHint
+        guard !store.isLoadingModel else {
+            statusMessage = "The model is still loading."
             return
         }
+        guard let segmentation = store.activeModel else {
+            statusMessage = ModelStore.missingModelHint
+            return
+        }
+        // Remember which model this run belongs to, in case the user switches while it runs.
+        let entry = store.activeEntry
+        let units = store.computeUnits
         let calibration = assets.calibration
         isBusy = true
         activeTap = devicePoint
@@ -53,9 +61,16 @@ final class InferenceViewModel: ObservableObject {
         }
         let tap = CaptureViewModel.imagePoint(devicePoint, in: frame)
         do {
-            let outcome = try await Task.detached(priority: .userInitiated) {
+            let measured = try await Task.detached(priority: .userInitiated) {
                 try InferenceRunner.run(model: segmentation, calibration: calibration, frame: frame, tapImagePoint: tap)
             }.value
+            var outcome = measured
+            outcome.modelVersion = entry?.version ?? ""
+            outcome.architecture = entry?.architecture ?? ""
+            outcome.computeUnits = units.rawValue
+            if store.activeID == entry?.id, store.computeUnits == units {
+                store.recordLatency(outcome.latencyMs)
+            }
             result = outcome
             resultLogged = false
             overlay = outcome.found

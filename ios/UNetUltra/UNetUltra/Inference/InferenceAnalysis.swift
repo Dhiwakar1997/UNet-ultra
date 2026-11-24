@@ -44,6 +44,11 @@ struct InferenceResult: Equatable {
     var latencyMs: Double
     /// The centre-square crop that turned the frame into the model input.
     var crop: CenterSquareCrop
+    /// Which model produced this, and how it was run. Filled in by the caller that knows the
+    /// library entry; logged with every result so runs of different models never mix.
+    var modelVersion = ""
+    var architecture = ""
+    var computeUnits = ""
 
     var areaPx: Int { pixels.count }
 
