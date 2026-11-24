@@ -123,6 +123,7 @@ jupyter lab notebooks
 | `03_evaluate` | Scores all three and the focus-only baseline on the test zip | metrics, plots, a generated verdict |
 | `04_export_coreml` | Exports each model as a bundle for the phone | `exports/<name>.unetmodel`, `exports/calibration.json` |
 | `05_compare_models` | Runs the exported bundles through Core ML on the Mac, side by side | one table with accuracy, latency and size |
+| `06_pets_unet_vs_dino` | Side experiment on the public Oxford-IIIT Pet dataset: plain U-Net against U-Net + DINOv2, masks only | Dice, IoU, speed, and whether the difference is beyond chance |
 
 ### Models
 

@@ -517,4 +517,100 @@ plots.error_vs_distance(results)
 plots.error_vs_distance(results, key="pred_width_cm", truth="true_width_cm", ylabel="width error (cm)");
 """),
 ])
+write("06_pets_unet_vs_dino", [
+    md("""
+# 06 · Plain U-Net against U-Net + DINOv2 on a public dataset
+
+A side experiment, separate from the AirPods project. It asks one question: **do frozen DINOv2
+features help the U-Net segment?**
+
+- **Data:** the Oxford-IIIT Pet dataset: about 7,400 photos of cats and dogs, each with a pixel
+  mask of the animal. It downloads automatically (about 800 MB) the first time.
+- **Models:** the same two architectures as the main project, `unet_multi` (plain U-Net) and
+  `unet_embed` (U-Net with a frozen DINOv2-small encoder fused at the bottleneck).
+- **What is left out:** this dataset has no depth, focus or focal length. Only the mask is
+  trained, and the meta input is zero for both models, so neither gets any camera information.
+
+Both models see the same images, the same split, the same number of epochs and the same seed.
+"""),
+    code(SETUP),
+    code("""
+IMAGE_SIZE = 256      # input is IMAGE_SIZE x IMAGE_SIZE; a multiple of 16
+TRAIN_LIMIT = 1000    # training photos to use; None uses all (about 3,380 after validation is held out)
+VAL_SIZE = 300        # held out of the training split, for choosing the best epoch
+TEST_LIMIT = 1000     # test photos to score on; None uses all 3,669
+EPOCHS = 15
+BATCH_SIZE = 16
+PETS_DIR = DATA / "oxford_pets"
+""", tag="parameters"),
+    md("## Data\n\nThe border between animal and background is marked uncertain in this dataset; those pixels are ignored in training and scoring."),
+    code("""
+from unetultra import pets
+
+trainval = pets.load_oxford_pets(PETS_DIR, "trainval")
+test_base = pets.load_oxford_pets(PETS_DIR, "test")
+train_indices, val_indices = pets.split_indices(len(trainval), TRAIN_LIMIT, VAL_SIZE)
+train_set = pets.PetSegmentation(trainval, train_indices, IMAGE_SIZE, augment=True)
+val_set = pets.PetSegmentation(trainval, val_indices, IMAGE_SIZE)
+test_set = pets.PetSegmentation(test_base, range(len(test_base))[: TEST_LIMIT or len(test_base)], IMAGE_SIZE)
+print(f"train {len(train_set)}, validation {len(val_set)}, test {len(test_set)} photos at {IMAGE_SIZE}x{IMAGE_SIZE}")
+""", tag="data"),
+    md("## Train both models\n\nOne line per epoch; `*` marks the best validation Dice so far, which is the checkpoint kept."),
+    code("""
+models, histories = {}, {}
+for architecture, label in pets.ARCHITECTURES.items():
+    models[label], histories[label] = pets.fit_segmentation(
+        architecture, train_set, val_set, MODELS, epochs=EPOCHS, batch_size=BATCH_SIZE)
+    print()
+pets.plot_curves(histories);
+"""),
+    md("## Results on the test photos\n\nNeither model has seen these photos."),
+    code("""
+import numpy as np
+
+results = {label: pets.evaluate_segmentation(model, test_set, batch_size=BATCH_SIZE) for label, model in models.items()}
+print(f"{'':28}" + "".join(f"{label:>18}" for label in results))
+print(f"{'mask Dice (mean)':28}" + "".join(f"{r['dice']:18.4f}" for r in results.values()))
+print(f"{'mask IoU (mean)':28}" + "".join(f"{r['iou']:18.4f}" for r in results.values()))
+print(f"{'photos with Dice < 0.8':28}" + "".join(f"{np.mean(np.array(r['per_image_dice']) < 0.8):18.1%}" for r in results.values()))
+print(f"{'time per photo':28}" + "".join(f"{r['ms_per_image']:15.1f} ms" for r in results.values()))
+print(f"{'time per training epoch':28}" + "".join(f"{np.mean([row['seconds'] for row in h]):16.0f} s" for h in histories.values()))
+counts = {label: pets.count_parameters(model) for label, model in models.items()}
+print(f"{'trainable parameters':28}" + "".join(f"{c[0] / 1e6:16.2f} M" for c in counts.values()))
+print(f"{'all parameters':28}" + "".join(f"{c[1] / 1e6:16.2f} M" for c in counts.values()))
+"""),
+    md("""
+### Is the difference real?
+
+Both models are scored on the same photos, so the comparison is made photo by photo. The
+interval is a 95% bootstrap range for the mean difference: if it does not include zero, the
+difference is unlikely to be chance. It says nothing about a different dataset or training budget.
+"""),
+    code("""
+plain, embed = list(results)
+mean, low, high = pets.paired_difference(results[plain]["per_image_dice"], results[embed]["per_image_dice"])
+print(f"Dice, {embed} minus {plain}: {mean:+.4f}  (95% interval {low:+.4f} to {high:+.4f})")
+if low > 0:
+    print(f"{embed} is better, beyond what chance would explain on {len(test_set)} photos.")
+elif high < 0:
+    print(f"{plain} is better, beyond what chance would explain on {len(test_set)} photos.")
+else:
+    print("The interval includes zero: no clear difference on this run.")
+wins = np.mean(np.array(results[embed]["per_image_dice"]) > np.array(results[plain]["per_image_dice"]))
+print(f"{embed} has the higher Dice on {wins:.0%} of the photos.")
+"""),
+    md("## Where they differ most\n\nThe photos with the largest gap in each direction: first where the plain U-Net does better, then where DINOv2 does."),
+    code("""
+pets.plot_examples(test_set, results, n=6);
+"""),
+    md("""
+## Things to try
+
+- Lower `TRAIN_LIMIT` (for example 100). Pretrained features usually help most when training
+  data is scarce, which is the situation in the AirPods project.
+- Raise `TRAIN_LIMIT` to `None` and `EPOCHS` to 30 to see whether the plain U-Net catches up.
+
+_Your notes:_
+"""),
+])
 print("notebooks written")
